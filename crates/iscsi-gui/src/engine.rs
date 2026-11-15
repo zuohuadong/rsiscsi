@@ -1,7 +1,7 @@
 use crate::state::{Config, SavedTarget, config_path, load_config, save_config};
 use iscsi_core::{
-    BenchOptions, BenchReport, BenchmarkCancellation, CacheMode, Capacity, DiscoveredTarget,
-    InquiryData, Session, benchmark_cancellable, discover_with_chap, login,
+    BenchOptions, BenchReport, BenchmarkCancellation, CacheConfig, CacheMode, Capacity,
+    DiscoveredTarget, InquiryData, Session, benchmark_cancellable, discover_with_chap, login,
 };
 use std::{future::Future, time::Duration};
 use tokio::{runtime::Handle, sync::mpsc, task::AbortHandle};
@@ -25,6 +25,7 @@ pub enum Event {
         mib: f64,
         errors: u64,
         retries: u64,
+        cache_error: Option<String>,
     },
     ConnectionClosed(u64),
     BenchFinished(Result<Option<BenchReport>, String>),
@@ -129,6 +130,7 @@ impl Engine {
                                 mib: sampler.mib_per_second,
                                 errors: snapshot.errors,
                                 retries: snapshot.retries,
+                                cache_error: session.cache_flush_error(),
                             })
                             .is_err()
                         {
@@ -154,17 +156,29 @@ impl Engine {
         });
     }
 
-    pub fn benchmark(&mut self, session: Session, options: BenchOptions) {
+    pub fn benchmark(&mut self, mut session: Session, options: BenchOptions, cache: CacheConfig) {
         let cancellation = BenchmarkCancellation::default();
         self.cancel = Some(cancellation.clone());
         self.spawn(async move {
+            if session.cache_config() != cache {
+                let configured = async {
+                    if session.cache_stats().dirty_bytes > 0 {
+                        session.flush().await?;
+                    }
+                    session.try_enable_cache(cache)
+                }
+                .await;
+                if let Err(error) = configured {
+                    return Event::BenchFinished(Err(error.to_string()));
+                }
+            }
             let outcome = benchmark_cancellable(&session, options, cancellation.clone())
                 .await
                 .map_err(|error| error.to_string());
             if cancellation.is_cancelled() {
                 // Workers have joined; only now is Logout allowed to race no I/O.
                 let closed = session.logout().await.map_err(|error| error.to_string());
-                return Event::BenchFinished(closed.map(|()| None));
+                return Event::BenchFinished(finish_cancelled_benchmark(outcome, closed));
             }
             Event::BenchFinished(outcome)
         });
@@ -174,6 +188,45 @@ impl Engine {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
+    }
+}
+
+fn finish_cancelled_benchmark(
+    outcome: Result<Option<BenchReport>, String>,
+    closed: Result<(), String>,
+) -> Result<Option<BenchReport>, String> {
+    match (outcome, closed) {
+        (Err(error), Err(cleanup)) => Err(format!("{error}；刷写或退出失败：{cleanup}")),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Ok(_), Ok(())) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_never_hides_write_or_cleanup_failures() {
+        assert_eq!(
+            finish_cancelled_benchmark(Err("write failed".into()), Ok(())).unwrap_err(),
+            "write failed"
+        );
+        let failure =
+            finish_cancelled_benchmark(Err("write failed".into()), Err("sync failed".into()))
+                .unwrap_err();
+        assert!(failure.contains("write failed"));
+        assert!(failure.contains("sync failed"));
+        assert_eq!(
+            finish_cancelled_benchmark(Ok(None), Err("sync failed".into())).unwrap_err(),
+            "sync failed"
+        );
+        assert!(
+            finish_cancelled_benchmark(Ok(None), Ok(()))
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

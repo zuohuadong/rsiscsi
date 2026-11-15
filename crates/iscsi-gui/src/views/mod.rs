@@ -45,23 +45,43 @@ pub struct Desktop {
     report: Option<BenchReport>,
     log: VecDeque<String>,
     started: Instant,
+    closing: bool,
+    pending_target: Option<usize>,
+    last_cache_error: Option<String>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Desktop {
-    pub fn new(runtime: Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        runtime: Handle,
+        mut quit_requests: tokio::sync::mpsc::UnboundedReceiver<()>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |this, cx| this.request_close(window, cx))
+                .unwrap_or(false)
+        });
+        App::on_action(cx, |_: &crate::Quit, _| crate::termination::request());
         let (mut engine, mut events) = Engine::new(runtime);
         engine.load();
         let bench_form = benchmark::BenchForm::new(window, cx);
         let subscriptions = vec![cx.observe(&bench_form.pattern, |_, _, cx| cx.notify())];
         let event_task = cx.spawn_in(window, async move |weak, cx| {
-            while let Some(event) = events.recv().await {
-                if weak
-                    .update_in(cx, |this, window, cx| this.apply_event(event, window, cx))
-                    .is_err()
-                {
-                    break;
+            loop {
+                tokio::select! {
+                    event = events.recv() => {
+                        let Some(event) = event else { break };
+                        if weak.update_in(cx, |this, window, cx| this.apply_event(event, window, cx)).is_err() { break; }
+                    }
+                    quit = quit_requests.recv() => {
+                        if quit.is_none() { break; }
+                        if weak.update_in(cx, |this, window, cx| {
+                            if this.request_close(window, cx) { window.remove_window(); }
+                        }).is_err() { break; }
+                    }
                 }
             }
         });
@@ -92,6 +112,9 @@ impl Desktop {
             report: None,
             log: VecDeque::new(),
             started: Instant::now(),
+            closing: false,
+            pending_target: None,
+            last_cache_error: None,
             _events: event_task,
             _subscriptions: subscriptions,
         }
@@ -102,6 +125,7 @@ impl Desktop {
             || self.connect.running()
             || self.disconnect.running()
             || self.bench.running()
+            || self.closing
     }
 
     fn log(&mut self, message: impl AsRef<str>) {
@@ -121,6 +145,38 @@ impl Desktop {
         self.connection_generation = None;
         self.iops = 0.;
         self.mib = 0.;
+        self.bench_form.allow_write = false;
+        self.bench_form.write_back = false;
+        self.last_cache_error = None;
+    }
+
+    fn start_disconnect(&mut self, cx: &mut Context<Self>) {
+        if self.bench.running() || self.disconnect.running() {
+            return;
+        }
+        if let Some(connection) = &self.connection {
+            let session = connection.session.clone();
+            self.disconnect = Operation::Running;
+            self.log("正在刷写并断开会话");
+            self.engine.disconnect(session);
+            cx.notify();
+        }
+    }
+
+    fn request_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.connection.is_none() && !self.connect.running() && !self.bench.running() {
+            return true;
+        }
+        self.closing = true;
+        self.pending_target = None;
+        if self.bench.running() {
+            self.engine.cancel_benchmark();
+            self.log("退出前正在停止测试并刷写");
+        } else {
+            self.start_disconnect(cx);
+        }
+        cx.notify();
+        false
     }
 }
 
@@ -155,6 +211,7 @@ impl Render for Desktop {
             );
         }
         v_flex()
+            .key_context("iSCSI")
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

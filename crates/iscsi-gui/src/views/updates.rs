@@ -20,21 +20,48 @@ impl Desktop {
                 Err(message) => self.discovery = Operation::Failed(message),
             },
             Event::Connected(outcome) => self.connected(outcome, window, cx),
-            Event::Disconnected(outcome) => {
-                self.disconnect = outcome.err().map(Operation::Failed).unwrap_or_default();
-                self.log("会话已断开");
-            }
+            Event::Disconnected(outcome) => match outcome {
+                Ok(()) => {
+                    self.disconnect = Operation::Idle;
+                    self.clear_connection();
+                    self.log("会话已断开");
+                    if self.closing {
+                        window.remove_window();
+                    } else if let Some(index) = self.pending_target.take() {
+                        self.select_target(index, window, cx);
+                    }
+                }
+                Err(message) => {
+                    self.log(format!(
+                        "刷写或断开失败：{message}；会话及脏数据已保留，请重试断开"
+                    ));
+                    self.disconnect = Operation::Failed(message);
+                    self.closing = false;
+                    self.pending_target = None;
+                    self.tab = 1;
+                    if let Some(connection) = &self.connection {
+                        self.connection_generation = Some(self.engine.sample(&connection.session));
+                    }
+                }
+            },
             Event::Rates {
                 generation,
                 iops,
                 mib,
                 errors,
                 retries,
+                cache_error,
             } if self.connection_generation == Some(generation) => {
                 self.iops = iops;
                 self.mib = mib;
                 self.errors = errors;
                 self.retries = retries;
+                if cache_error != self.last_cache_error {
+                    if let Some(error) = &cache_error {
+                        self.log(format!("定时刷写失败：{error}；脏数据已保留"));
+                    }
+                    self.last_cache_error = cache_error;
+                }
                 if self.bench.running() {
                     if self.history.len() == 60 {
                         self.history.pop_front();
@@ -46,13 +73,31 @@ impl Desktop {
             Event::ConnectionClosed(generation)
                 if self.connection_generation == Some(generation) && !self.bench.running() =>
             {
-                self.clear_connection();
+                let dirty = self
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.session.cache_stats().dirty_bytes > 0);
+                if dirty {
+                    self.engine.stop_sampling();
+                    self.log("连接已终止，未刷写数据仍在内存；禁止换目标或退出");
+                } else {
+                    self.clear_connection();
+                }
                 self.connect = Operation::Failed("连接已终止，请重新连接".into());
                 self.bench_form.allow_write = false;
                 self.log("连接已终止");
             }
             Event::ConnectionClosed(_) => {}
-            Event::BenchFinished(outcome) => self.benchmark_finished(outcome),
+            Event::BenchFinished(outcome) => {
+                self.benchmark_finished(outcome);
+                if self.closing {
+                    if self.connection.is_some() {
+                        self.start_disconnect(cx);
+                    } else {
+                        window.remove_window();
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -111,10 +156,16 @@ impl Desktop {
                 );
                 self.connection = Some(connection);
                 self.log("连接成功；设备信息已读取");
+                if self.closing {
+                    self.start_disconnect(cx);
+                }
             }
             Err(message) => {
                 self.log("连接失败");
                 self.connect = Operation::Failed(message);
+                if self.closing {
+                    window.remove_window();
+                }
             }
         }
     }
@@ -133,8 +184,19 @@ impl Desktop {
                 self.bench = Operation::Idle;
             }
             Err(message) => {
-                self.clear_connection();
-                self.log("测试失败，会话已断开");
+                let retain = self.connection.as_ref().is_some_and(|connection| {
+                    !connection.session.is_closed()
+                        || connection.session.cache_stats().dirty_bytes > 0
+                });
+                if !retain {
+                    self.clear_connection();
+                }
+                self.log(format!(
+                    "测试或刷写失败：{message}；未刷写数据保留，请重试断开"
+                ));
+                self.closing = false;
+                self.pending_target = None;
+                self.tab = 1;
                 self.bench = Operation::Failed(message);
             }
         }

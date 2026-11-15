@@ -28,17 +28,7 @@ impl Desktop {
                                     || self.bench.running()
                                     || self.disconnect.running(),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(connection) = this.connection.take() {
-                                    this.disconnect = Operation::Running;
-                                    this.connection_generation = None;
-                                    this.engine.disconnect(connection.session);
-                                    this.iops = 0.;
-                                    this.mib = 0.;
-                                    this.bench_form.allow_write = false;
-                                    cx.notify();
-                                }
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.start_disconnect(cx))),
                     ),
             )
             .children(operation_line("连接", &self.connect, cx))
@@ -60,6 +50,16 @@ impl Desktop {
                     }),
             );
         if let Some(connection) = &self.connection {
+            if connection.session.cache_config().enabled() {
+                let stats = connection.session.cache_stats();
+                panel = panel
+                    .child(pair(
+                        "本地读缓存命中率",
+                        format!("{:.2}%", stats.hit_rate() * 100.),
+                        cx,
+                    ))
+                    .child(pair("脏数据字节数", stats.dirty_bytes.to_string(), cx));
+            }
             let inquiry = &connection.inquiry;
             panel = panel
                 .child(heading("逻辑单元"))
@@ -120,6 +120,9 @@ impl Desktop {
     }
 
     fn start_connect(&mut self, cx: &mut Context<Self>) {
+        if self.locked() {
+            return;
+        }
         match self.editor.target(cx) {
             Ok(target) => {
                 self.connect = Operation::Running;

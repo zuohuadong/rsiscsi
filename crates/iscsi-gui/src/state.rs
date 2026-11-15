@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use iscsi_core::{
-    BenchOptions, BenchPattern, Capacity, ChapCredentials, SessionOptions, Target, TargetAddr,
+    BenchOptions, BenchPattern, CacheConfig, Capacity, ChapCredentials, SessionOptions, Target,
+    TargetAddr,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -172,6 +173,37 @@ pub struct BenchSettings {
     pub allow_write: bool,
 }
 
+#[derive(Default)]
+pub struct CacheSettings {
+    pub read_enabled: bool,
+    pub read_mib: usize,
+    pub write_back_enabled: bool,
+    pub write_back_mib: usize,
+}
+
+impl CacheSettings {
+    pub fn config(&self, allow_write: bool) -> Result<CacheConfig> {
+        if self.write_back_enabled && !allow_write {
+            bail!("写回缓存必须同时确认允许写入");
+        }
+        let budget = |enabled: bool, mib: usize| -> Result<usize> {
+            if !enabled {
+                return Ok(0);
+            }
+            let bytes = mib.checked_mul(1_048_576).context("缓存容量溢出")?;
+            if bytes == 0 {
+                bail!("开启缓存时容量必须大于 0 MiB");
+            }
+            Ok(bytes)
+        };
+        Ok(CacheConfig {
+            read_capacity_bytes: budget(self.read_enabled, self.read_mib)?,
+            write_back_capacity_bytes: budget(self.write_back_enabled, self.write_back_mib)?,
+            flush_interval: None,
+        })
+    }
+}
+
 impl BenchSettings {
     pub fn options(&self, capacity: Capacity, session_qd: usize) -> Result<BenchOptions> {
         if self.pattern.is_write() && !self.allow_write {
@@ -265,6 +297,26 @@ mod tests {
         assert!(settings.options(capacity, 32).is_err());
         settings.range_mib = u64::MAX;
         assert!(settings.options(capacity, 32).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn caches_default_off_and_writeback_requires_separate_confirmation() -> Result<()> {
+        let mut settings = CacheSettings::default();
+        assert_eq!(settings.config(false)?, CacheConfig::default());
+        settings.read_enabled = true;
+        assert!(settings.config(false).is_err());
+        settings.read_mib = 8;
+        assert_eq!(settings.config(false)?.read_capacity_bytes, 8 * 1_048_576);
+        settings.write_back_enabled = true;
+        settings.write_back_mib = 8;
+        assert!(settings.config(false).is_err());
+        assert_eq!(
+            settings.config(true)?.write_back_capacity_bytes,
+            8 * 1_048_576
+        );
+        settings.write_back_mib = usize::MAX;
+        assert!(settings.config(true).is_err());
         Ok(())
     }
 }

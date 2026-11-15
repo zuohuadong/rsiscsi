@@ -157,7 +157,24 @@ impl Desktop {
             )
     }
 
-    fn select_target(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_target(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bench.running()
+            || self.connect.running()
+            || self.disconnect.running()
+            || self.closing
+        {
+            return;
+        }
+        if self.connection.is_some() {
+            self.pending_target = Some(index);
+            self.start_disconnect(cx);
+            return;
+        }
         if let Some(target) = self.config.targets.get(index) {
             self.editor = Editor::new(target, window, cx);
             self.selected = Some(index);

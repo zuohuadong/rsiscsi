@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::BenchSettings;
+use crate::state::{BenchSettings, CacheSettings};
 use anyhow::{Context as _, Result};
 use component::{
     IndexPath, Sizable,
@@ -21,6 +21,10 @@ pub struct BenchForm {
     start: Entity<InputState>,
     range: Entity<InputState>,
     pub allow_write: bool,
+    pub read_cache: bool,
+    pub write_back: bool,
+    read_capacity: Entity<InputState>,
+    write_capacity: Entity<InputState>,
 }
 
 impl BenchForm {
@@ -52,6 +56,10 @@ impl BenchForm {
             start: editor::input("0", window, cx),
             range: editor::input("16384", window, cx),
             allow_write: false,
+            read_cache: false,
+            write_back: false,
+            read_capacity: editor::input("0", window, cx),
+            write_capacity: editor::input("0", window, cx),
         }
     }
 
@@ -105,12 +113,34 @@ impl BenchForm {
             allow_write: self.allow_write,
         })
     }
+
+    fn cache_config(&self, cx: &App) -> Result<iscsi_core::CacheConfig> {
+        CacheSettings {
+            read_enabled: self.read_cache,
+            read_mib: self
+                .read_capacity
+                .read(cx)
+                .value()
+                .parse()
+                .context("读缓存容量必须为非负整数")?,
+            write_back_enabled: self.write_back,
+            write_back_mib: self
+                .write_capacity
+                .read(cx)
+                .value()
+                .parse()
+                .context("写回容量必须为非负整数")?,
+        }
+        .config(self.allow_write)
+    }
 }
 
 impl Desktop {
     pub(super) fn benchmark_view(&self, cx: &mut Context<Self>) -> Div {
-        let running = self.bench.running();
-        let write_locked = self.bench_form.pattern(cx).is_write() && !self.bench_form.allow_write;
+        let running = self.bench.running() || self.disconnect.running() || self.closing;
+        let needs_confirmation =
+            self.bench_form.pattern(cx).is_write() || self.bench_form.write_back;
+        let write_locked = needs_confirmation && !self.bench_form.allow_write;
         let form = &self.bench_form;
         let controls = [
             ("块大小 (KiB)", &form.block),
@@ -148,7 +178,68 @@ impl Desktop {
                         )
                     })),
             )
-            .when(write_locked, |panel| {
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                Checkbox::new("read-cache")
+                                    .small()
+                                    .label("读缓存")
+                                    .checked(form.read_cache)
+                                    .disabled(running)
+                                    .on_change(cx.listener(|this, checked, _, cx| {
+                                        this.bench_form.read_cache = *checked;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(field(
+                                "读缓存容量 (MiB)",
+                                NumberInput::new(&form.read_capacity)
+                                    .small()
+                                    .accessibility_label("读缓存容量 MiB")
+                                    .disabled(running || !form.read_cache),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                Checkbox::new("write-back")
+                                    .small()
+                                    .label("写回缓存（危险）")
+                                    .checked(form.write_back)
+                                    .disabled(running)
+                                    .on_change(cx.listener(|this, checked, _, cx| {
+                                        this.bench_form.write_back = *checked;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(field(
+                                "写回容量 (MiB)",
+                                NumberInput::new(&form.write_capacity)
+                                    .small()
+                                    .accessibility_label("写回容量 MiB")
+                                    .disabled(running || !form.write_back),
+                                cx,
+                            )),
+                    ),
+            )
+            .when(form.write_back, |panel| {
+                panel.child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child("崩溃或断电会丢失未刷写的写入"),
+                )
+            })
+            .when(needs_confirmation || form.allow_write, |panel| {
                 panel.child(
                     Checkbox::new("allow-write")
                         .small()
@@ -205,20 +296,27 @@ impl Desktop {
     }
 
     fn start_benchmark(&mut self, cx: &mut Context<Self>) {
+        if self.bench.running() || self.disconnect.running() || self.closing {
+            return;
+        }
         let Some(connection) = &self.connection else {
             return;
         };
         let options = self.bench_form.settings(cx).and_then(|settings| {
-            settings.options(connection.capacity, connection.session.queue_depth())
+            Ok((
+                settings.options(connection.capacity, connection.session.queue_depth())?,
+                self.bench_form.cache_config(cx)?,
+            ))
         });
         match options {
-            Ok(options) => {
+            Ok((options, cache)) => {
                 self.bench = Operation::Running;
                 self.report = None;
                 self.history.clear();
                 self.log("开始单连接基准测试");
                 if let Some(connection) = &self.connection {
-                    self.engine.benchmark(connection.session.clone(), options);
+                    self.engine
+                        .benchmark(connection.session.clone(), options, cache);
                 }
             }
             Err(error) => self.bench = Operation::Failed(error.to_string()),

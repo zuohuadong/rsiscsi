@@ -1,10 +1,13 @@
 mod engine;
 mod state;
+mod termination;
 mod views;
 
 use gpui_kit::*;
 use std::{process::ExitCode, time::Duration};
 use tokio::runtime::Runtime;
+
+actions!(iscsi, [Quit]);
 
 fn main() -> ExitCode {
     let runtime = match Runtime::new() {
@@ -15,12 +18,26 @@ fn main() -> ExitCode {
         }
     };
     let handle = runtime.handle().clone();
+    let quit_requests = match termination::install() {
+        Ok(requests) => requests,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     application().with_assets(assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
         component::set_locale("zh-CN");
         theme::install(cx);
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.set_menus([Menu {
+            name: "iSCSI".into(),
+            items: vec![MenuItem::action("退出 iSCSI", Quit)],
+            disabled: false,
+        }]);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
+                termination::allow();
                 cx.quit();
             }
         })
@@ -41,9 +58,10 @@ fn main() -> ExitCode {
         };
         if let Err(error) = open_window(options, cx, |window, cx| {
             window.set_window_title("iSCSI");
-            cx.new(|cx| views::Desktop::new(handle, window, cx))
+            cx.new(|cx| views::Desktop::new(handle, quit_requests, window, cx))
         }) {
             eprintln!("无法打开窗口：{error}");
+            termination::allow();
             cx.quit();
         }
         cx.activate(true);
