@@ -211,6 +211,11 @@ async fn logout_connection(conn: &mut Connection, tag: u32) -> Result<(), Error>
 }
 
 impl Session {
+    /// Observe transport/protocol termination without issuing any SCSI command.
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
     pub fn negotiated(&self) -> &NegotiatedParams {
         &self.inner.params
     }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -85,12 +85,39 @@ pub struct BenchReport {
     pub results: Vec<BenchResult>,
 }
 
+/// Cooperative stop: no new requests after the next worker loop boundary.
+/// In-flight I/O is drained and all workers are joined before returning.
+#[derive(Clone, Default)]
+pub struct BenchmarkCancellation(Arc<AtomicBool>);
+
+impl BenchmarkCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// Benchmark a bounded region with bounded-memory HDR latency histograms.
 ///
 /// All workers are joined before returning, including on error. Warmup I/O and
 /// allocations are excluded; outstanding measured I/O is drained and included
 /// in elapsed time. Writes require an explicit destructive opt-in and range.
 pub async fn benchmark(session: &Session, opts: BenchOptions) -> Result<BenchReport, Error> {
+    benchmark_cancellable(session, opts, BenchmarkCancellation::default())
+        .await?
+        .ok_or_else(|| Error::Protocol("benchmark cancelled".into()))
+}
+
+/// UI variant. Cancellation returns `None` only after all workers have stopped.
+/// Cancellation does not flush, retry, or undo writes already issued.
+pub async fn benchmark_cancellable(
+    session: &Session,
+    opts: BenchOptions,
+    cancellation: BenchmarkCancellation,
+) -> Result<Option<BenchReport>, Error> {
     if opts.pattern.is_write() && (!opts.allow_destructive_write || opts.range_blocks.is_none()) {
         return Err(Error::Config(
             "write benchmark requires destructive opt-in and explicit range_blocks".into(),
@@ -108,6 +135,9 @@ pub async fn benchmark(session: &Session, opts: BenchOptions) -> Result<BenchRep
         return Err(Error::Config(
             "invalid benchmark size, duration or queue depth".into(),
         ));
+    }
+    if cancellation.is_cancelled() {
+        return Ok(None);
     }
     let capacity = session.capacity().await?;
     if !opts.block_size.is_multiple_of(capacity.block_size as usize) {
@@ -136,10 +166,43 @@ pub async fn benchmark(session: &Session, opts: BenchOptions) -> Result<BenchRep
         results: Vec::new(),
     };
     for &qd in &opts.queue_depths {
-        if !opts.warmup.is_zero() {
-            phase(session, &opts, blocks, range, qd, opts.warmup, false).await?;
+        if cancellation.is_cancelled() {
+            return Ok(None);
         }
-        let result = phase(session, &opts, blocks, range, qd, opts.duration, true).await?;
+        if !opts.warmup.is_zero() {
+            phase(
+                session,
+                &opts,
+                Phase {
+                    blocks,
+                    range,
+                    qd,
+                    duration: opts.warmup,
+                    measure: false,
+                },
+                &cancellation,
+            )
+            .await?;
+        }
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        let result = phase(
+            session,
+            &opts,
+            Phase {
+                blocks,
+                range,
+                qd,
+                duration: opts.duration,
+                measure: true,
+            },
+            &cancellation,
+        )
+        .await?;
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
         report.results.push(result);
         if opts.pattern.is_write() {
             let start = Instant::now();
@@ -147,18 +210,30 @@ pub async fn benchmark(session: &Session, opts: BenchOptions) -> Result<BenchRep
             report.flush_seconds += start.elapsed().as_secs_f64();
         }
     }
-    Ok(report)
+    Ok(Some(report))
 }
 
-async fn phase(
-    session: &Session,
-    opts: &BenchOptions,
+struct Phase {
     blocks: u32,
     range: u64,
     qd: usize,
     duration: Duration,
     measure: bool,
+}
+
+async fn phase(
+    session: &Session,
+    opts: &BenchOptions,
+    phase: Phase,
+    cancellation: &BenchmarkCancellation,
 ) -> Result<BenchResult, Error> {
+    let Phase {
+        blocks,
+        range,
+        qd,
+        duration,
+        measure,
+    } = phase;
     let barrier = Arc::new(Barrier::new(qd + 1));
     let clock = Arc::new(OnceLock::<Instant>::new());
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -178,6 +253,7 @@ async fn phase(
         let stop = stop.clone();
         let clock = clock.clone();
         let pattern = opts.pattern;
+        let cancellation = cancellation.clone();
         let start_lba = opts.start_lba;
         workers.spawn(async move {
             let mut rng = StdRng::from_entropy();
@@ -185,7 +261,10 @@ async fn phase(
             let start = *clock.get_or_init(Instant::now);
             let mut finished = start;
             let mut count = 0u64;
-            while start.elapsed() < duration && !stop.load(Ordering::Relaxed) {
+            while start.elapsed() < duration
+                && !stop.load(Ordering::Relaxed)
+                && !cancellation.is_cancelled()
+            {
                 let slot = if pattern.is_random() {
                     rng.gen_range(0..slots)
                 } else {

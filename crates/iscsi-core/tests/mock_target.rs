@@ -127,6 +127,81 @@ async fn logout(socket: &mut TcpStream, statsn: u32, digest: bool) {
 }
 
 #[tokio::test]
+async fn cooperative_benchmark_cancel_drains_workers_before_logout_without_flush() {
+    use iscsi_core::{BenchmarkCancellation, benchmark_cancellable};
+    for pattern in [BenchPattern::SeqRead, BenchPattern::SeqWrite] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancellation = BenchmarkCancellation::default();
+        let stop = cancellation.clone();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_login(listener, false).await;
+            let mut statsn = 2;
+            capacity(&mut socket, &mut statsn, false).await;
+            let mut commands = Vec::new();
+            for _ in 0..4 {
+                let command = recv(&mut socket, false).await;
+                assert_eq!(
+                    command.header.0[32],
+                    if pattern.is_write() { 0x8a } else { 0x88 }
+                );
+                commands.push(command);
+            }
+            stop.cancel();
+            for command in commands {
+                if pattern.is_write() {
+                    send(
+                        &mut socket,
+                        &response(wire::SCSI_RESPONSE, 0x80, &command, statsn),
+                        &[],
+                        false,
+                    )
+                    .await;
+                    statsn += 1;
+                } else {
+                    data_in(&mut socket, &command, &mut statsn, &[0; 512], false).await;
+                }
+            }
+            // The very next command must be Logout, never another I/O or flush.
+            logout(&mut socket, statsn, false).await;
+        });
+        let session = login(
+            &target(port),
+            &SessionOptions {
+                queue_depth: 4,
+                ..SessionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            benchmark_cancellable(
+                &session,
+                BenchOptions {
+                    pattern,
+                    block_size: 512,
+                    queue_depths: vec![4],
+                    duration: Duration::from_secs(60),
+                    warmup: Duration::ZERO,
+                    range_blocks: Some(1024),
+                    allow_destructive_write: pattern.is_write(),
+                    ..BenchOptions::default()
+                },
+                cancellation,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(report.is_none());
+        session.clone().logout().await.unwrap();
+        assert!(session.is_closed());
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn pipelined_reads_complete_out_of_order_and_keepalive() {
     for digest in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
