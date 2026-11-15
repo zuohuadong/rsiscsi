@@ -103,10 +103,20 @@ CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
 - **支持开发**：下载集中到同一个分享页，便于累积赞助来覆盖 Apple Developer Program
   年费（当前全部为 ad-hoc 签名，见上一节）。
 
-需要的仓库 Secrets（与 `qnap-pkg-sync` 同名）：`WEBDAV_URL`、`WEBDAV_USERNAME`、
-`WEBDAV_PASSWORD`、`WEBDAV_ROOT_PATH`。目标目录可用仓库变量
-`SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`；若「软件集合」就在网盘根目录，
-把它设为 `/软件集合/rsiscsi`（以 `/` 开头即忽略 `WEBDAV_ROOT_PATH`）。
+发布默认走城通的 REST API（`scripts/publish-ctfile.sh`），只需要会话令牌，缺失的目录会
+自动创建。需要的仓库 Secrets：
+
+| Secret | 说明 |
+|---|---|
+| `CTFILE_SESSION` | 已登录城通网页端的会话令牌 |
+| `CTFILE_FOLDER_ID` | 父目录的数字 id，`0` 表示网盘根目录 |
+
+目标目录用仓库变量 `SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`；这里的路径
+始终相对于 `CTFILE_FOLDER_ID`，若父目录就是根目录则直接写 `软件集合/rsiscsi`。
+
+没有会话令牌时，CI 会退回到 WebDAV（`scripts/publish-webdav.sh`），此时需要
+`WEBDAV_URL`、`WEBDAV_USERNAME`、`WEBDAV_PASSWORD`、`WEBDAV_ROOT_PATH` 四个 Secrets；
+这条路径下 `SOFTWARE_COLLECTION_DIR` 若以 `/` 开头则忽略 `WEBDAV_ROOT_PATH`。
 
 CI 只在打标签或手动触发时运行，不消耗每次推送的 macOS 分钟数；本地仍可用
 `./scripts/package-dmg.sh` 生成同样的 DMG。

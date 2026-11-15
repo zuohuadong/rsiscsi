@@ -1,10 +1,11 @@
 name: Build and Publish DMG
 
-# Tag pushes and manual runs publish the DMG to the WebDAV drive.
-# Binaries are intentionally not attached to GitHub Releases: they are hosted
-# on a domestic file-sharing drive so users in mainland China can download
-# without a proxy, and so all traffic lands on one page that also collects
-# sponsorship for the Apple Developer Program fee.
+# Tag pushes and manual runs publish the DMG to the CTFile drive: the REST API
+# is the primary transport and WebDAV is the fallback. Binaries are
+# intentionally not attached to GitHub Releases: they are hosted on a domestic
+# file-sharing drive so users in mainland China can download without a proxy,
+# and so all traffic lands on one page that also collects sponsorship for the
+# Apple Developer Program fee.
 
 on:
   push:
@@ -25,10 +26,6 @@ jobs:
     # macos-latest resolves to an arm64 image on public repositories.
     runs-on: macos-latest
     timeout-minutes: 60
-    env:
-      # Destination folder inside the WebDAV drive. Override with the repository
-      # variable SOFTWARE_COLLECTION_DIR when the layout differs.
-      TARGET_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR || '软件集合/rsiscsi' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -68,62 +65,27 @@ jobs:
             dist/*.sha256
           retention-days: 30
 
-      - name: Upload to WebDAV
+      - name: Publish
         env:
+          # CTFile REST API: only a session token is needed and missing folders
+          # are created automatically. This is the preferred transport.
+          CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
+          CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
+          CTFILE_TARGET_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR || '软件集合/rsiscsi' }}
+          # WebDAV fallback for accounts without a usable REST session token.
           WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
           WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
           WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
           WEBDAV_ROOT_PATH: ${{ secrets.WEBDAV_ROOT_PATH }}
+          SOFTWARE_COLLECTION_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR }}
           VERSION: ${{ steps.collect.outputs.version }}
           DMG: ${{ steps.collect.outputs.dmg }}
         run: |
-          set -eu
-          : "${WEBDAV_URL:?add the WEBDAV_URL repository secret}"
-          : "${WEBDAV_USERNAME:?add the WEBDAV_USERNAME repository secret}"
-          : "${WEBDAV_PASSWORD:?add the WEBDAV_PASSWORD repository secret}"
-
-          # Percent-encode every path segment; the target folder name is Chinese.
-          encode() {
-            python3 -c 'import sys,urllib.parse;print("/".join(urllib.parse.quote(p) for p in sys.argv[1].split("/") if p))' "$1"
-          }
-
-          base=${WEBDAV_URL%/}
-          root=${WEBDAV_ROOT_PATH:-/qnaporg-github}
-          # An absolute TARGET_DIR ignores WEBDAV_ROOT_PATH, e.g. /软件集合/rsiscsi
-          # when the folder sits directly under the drive root.
-          case "$TARGET_DIR" in
-            /*) target=${TARGET_DIR#/} ;;
-            *) target="${root#/}/$TARGET_DIR" ;;
-          esac
-          dir="$base/$(encode "${target}/${VERSION}")"
-
-          # Create parent folders one level at a time; 405 means it already exists.
-          rest="${target}/${VERSION}"
-          prefix=""
-          while [ -n "$rest" ]; do
-            case "$rest" in
-              */*) part=${rest%%/*}; rest=${rest#*/} ;;
-              *) part=$rest; rest="" ;;
-            esac
-            prefix="$prefix/$part"
-            code=$(curl --silent --show-error --request MKCOL \
-              --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" \
-              --output /dev/null --write-out '%{http_code}' \
-              "$base$(encode "$prefix")" || true)
-            case "$code" in
-              201|405|301|302) ;;
-              *) echo "MKCOL $prefix failed with HTTP $code" >&2; exit 1 ;;
-            esac
-          done
-
-          for file in "$DMG" "$DMG.sha256"; do
-            name=${file##*/}
-            echo "uploading $name"
-            curl --silent --show-error --fail-with-body \
-              --upload-file "$file" \
-              --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" \
-              "$dir/$(encode "$name")"
-            echo
-          done
-
-          echo "published $VERSION to ${target}/${VERSION}"
+          if [ -n "${CTFILE_SESSION:-}" ] && [ -n "${CTFILE_FOLDER_ID:-}" ]; then
+            ./scripts/publish-ctfile.sh
+          elif [ -n "${WEBDAV_URL:-}" ] && [ -n "${WEBDAV_USERNAME:-}" ] && [ -n "${WEBDAV_PASSWORD:-}" ]; then
+            ./scripts/publish-webdav.sh
+          else
+            echo "::error::add CTFILE_SESSION and CTFILE_FOLDER_ID, or WEBDAV_URL, WEBDAV_USERNAME and WEBDAV_PASSWORD"
+            exit 1
+          fi

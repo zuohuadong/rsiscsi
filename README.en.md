@@ -106,11 +106,20 @@ GitHub Releases, for two reasons:
   accumulate sponsorship for the Apple Developer Program fee (everything is ad-hoc signed
   today, see the previous section).
 
-Required repository secrets (same names as `qnap-pkg-sync`): `WEBDAV_URL`, `WEBDAV_USERNAME`,
-`WEBDAV_PASSWORD`, `WEBDAV_ROOT_PATH`. Override the destination folder with the repository
-variable `SOFTWARE_COLLECTION_DIR`; it defaults to `软件集合/rsiscsi`. When the folder sits
-directly under the drive root, set it to `/软件集合/rsiscsi` (a leading `/` ignores
-`WEBDAV_ROOT_PATH`).
+Publishing uses the CTFile REST API by default (`scripts/publish-ctfile.sh`). It needs only a
+session token and creates missing folders automatically. Required repository secrets:
+
+| Secret | Meaning |
+|---|---|
+| `CTFILE_SESSION` | session token from a logged-in CTFile browser session |
+| `CTFILE_FOLDER_ID` | numeric id of the parent folder, `0` for the drive root |
+
+Override the destination folder with the repository variable `SOFTWARE_COLLECTION_DIR`; it
+defaults to `软件集合/rsiscsi` and is always relative to `CTFILE_FOLDER_ID`.
+
+Without a session token, CI falls back to WebDAV (`scripts/publish-webdav.sh`), which needs
+`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` and `WEBDAV_ROOT_PATH`. On that path a
+leading `/` in `SOFTWARE_COLLECTION_DIR` ignores `WEBDAV_ROOT_PATH`.
 
 CI runs only on tags or manual dispatch, so regular pushes do not consume macOS minutes.
 Locally, `./scripts/package-dmg.sh` still produces the same DMG.
