@@ -1,21 +1,23 @@
 # iscsi-rs
 
-Rust 用户态 iSCSI 发起端。当前交付为 phase 1：协议引擎和 CLI，GUI 保留原始骨架。
+Rust 用户态 iSCSI 发起端：协议引擎 + CLI + 原生桌面应用（GPUI / gpui-kit）。
 不会创建、挂载块设备，也不会修改 iSCSIKit、安装系统扩展或更改系统设置。
 
 ## 构建与测试
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build -p iscsi-core -p iscsi-cli
-cargo test -p iscsi-core -p iscsi-cli
+cargo build --workspace
+cargo test -p iscsi-core -p iscsi-gui
 cargo clippy -p iscsi-core -p iscsi-cli --all-targets -- -D warnings
 cargo fmt --all --check
 cargo run -p iscsi-cli -- --help
+cargo run -p iscsi-gui
 ```
 
-本机默认 `stable` 缺少可用的 `rustc`，因此 `rust-toolchain.toml` 固定到本机已经安装、
-验证可运行的 Rust 1.97.1。不更改全局工具链设置。
+`gpui-kit` 0.9.1 需要 Rust ≥ 1.100（`std::hint::cold_path`、
+`Option::map_or_default`），因此 `rust-toolchain.toml` 固定到本机已验证的 1.100.0。
+不更改全局工具链设置。
 
 默认测试只访问本地模拟目标。真实只读烟雾测试需显式设置：
 
@@ -96,7 +98,20 @@ CLI 和核心 `benchmark` 同时要求显式破坏性确认及区域：
 它保留省略的默认值、大小写、前导零和百分号文本，不在加载时规范化。
 历史 `iscsi://iqn...` 形式必须另行提供 fallback portal。
 URL 和 `to_url()` 的返回值可能含凭据，不得记录到日志。
-phase 1 不创建或加载 GUI 配置文件。
+
+## 桌面应用
+
+`cargo run -p iscsi-gui` 打开 900×620 的紧凑窗口（深色单色主题，参考 Volt Native）：
+左侧是已保存目标与 SendTargets 发现，右侧通过「目标 / 会话 / 基准」切换。
+目标保存在 `~/Library/Application Support/iscsi-rs/targets.toml`（目录 0700、文件 0600，
+临时文件 + rename 原子写入），IQN 原样保存、不做规范化。
+连接、INQUIRY/容量读取和实时速率（1 Hz EWMA）在独立 Tokio 任务中执行，
+结果通过 channel 回到 UI 线程，不阻塞渲染。
+
+写入测试默认不可见：只有选择顺序写/随机写后才会出现
+「允许写入（会破坏 LUN 上的数据）」确认项，未确认时运行按钮禁用并显示红色警告。
+读取默认限制在 LUN 前 16 GiB 窗口内；连接与信息读取阶段不发送写入或 SYNCHRONIZE CACHE。
+未知数据区域不得写入。
 
 ## 文件布局
 
@@ -115,8 +130,16 @@ crates/iscsi-core/src/bench.rs        四种模式、预热、QD 扫描、HDR �
 crates/iscsi-core/tests/mock_target.rs 本地协议、并发、取消和基准集成测试
 crates/iscsi-cli/Cargo.toml           CLI 包和 iscsi-rs 二进制定义
 crates/iscsi-cli/src/main.rs          中文 clap 命令、JSON、文件输出、退出码
-crates/iscsi-gui/Cargo.toml           原有 GUI 依赖，未修改
-crates/iscsi-gui/src/main.rs          原有 skeleton，未修改
+crates/iscsi-gui/Cargo.toml           GUI 包依赖（gpui-kit 0.9.1）
+crates/iscsi-gui/src/main.rs          深色主题、窗口尺寸与 GPUI 启动
+crates/iscsi-gui/src/state.rs         目标模型、配置原子读写、基准参数与安全校验
+crates/iscsi-gui/src/engine.rs        Tokio 运行时桥、事件通道、取消与断开
+crates/iscsi-gui/src/views/mod.rs     窗口骨架：标题栏、侧栏、标签、状态栏
+crates/iscsi-gui/src/views/sidebar.rs 目标列表与发现面板
+crates/iscsi-gui/src/views/editor.rs  目标编辑表单与 URL 导入
+crates/iscsi-gui/src/views/session.rs 会话控制、设备信息、协商参数与日志
+crates/iscsi-gui/src/views/benchmark.rs 基准表单、结果与吞吐量柱状图
+crates/iscsi-gui/src/views/updates.rs 后台事件到 UI 状态的归约
 ```
 
 真实目标验证数据见 `docs/phase1-verification.md`。
