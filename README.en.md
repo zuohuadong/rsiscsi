@@ -108,7 +108,9 @@ GitHub Releases, for two reasons:
 
 Required repository secrets (same names as `qnap-pkg-sync`): `WEBDAV_URL`, `WEBDAV_USERNAME`,
 `WEBDAV_PASSWORD`, `WEBDAV_ROOT_PATH`. Override the destination folder with the repository
-variable `SOFTWARE_COLLECTION_DIR`; it defaults to `软件集合/rsiscsi`.
+variable `SOFTWARE_COLLECTION_DIR`; it defaults to `软件集合/rsiscsi`. When the folder sits
+directly under the drive root, set it to `/软件集合/rsiscsi` (a leading `/` ignores
+`WEBDAV_ROOT_PATH`).
 
 CI runs only on tags or manual dispatch, so regular pushes do not consume macOS minutes.
 Locally, `./scripts/package-dmg.sh` still produces the same DMG.

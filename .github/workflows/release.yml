@@ -88,10 +88,16 @@ jobs:
 
           base=${WEBDAV_URL%/}
           root=${WEBDAV_ROOT_PATH:-/qnaporg-github}
-          dir="$base/$(encode "${root}/${TARGET_DIR}/${VERSION}")"
+          # An absolute TARGET_DIR ignores WEBDAV_ROOT_PATH, e.g. /软件集合/rsiscsi
+          # when the folder sits directly under the drive root.
+          case "$TARGET_DIR" in
+            /*) target=${TARGET_DIR#/} ;;
+            *) target="${root#/}/$TARGET_DIR" ;;
+          esac
+          dir="$base/$(encode "${target}/${VERSION}")"
 
           # Create parent folders one level at a time; 405 means it already exists.
-          rest="${root}/${TARGET_DIR}/${VERSION}"
+          rest="${target}/${VERSION}"
           prefix=""
           while [ -n "$rest" ]; do
             case "$rest" in
@@ -119,4 +125,4 @@ jobs:
             echo
           done
 
-          echo "published $VERSION to ${root}/${TARGET_DIR}/${VERSION}"
+          echo "published $VERSION to ${target}/${VERSION}"

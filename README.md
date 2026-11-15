@@ -105,7 +105,8 @@ CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
 
 需要的仓库 Secrets（与 `qnap-pkg-sync` 同名）：`WEBDAV_URL`、`WEBDAV_USERNAME`、
 `WEBDAV_PASSWORD`、`WEBDAV_ROOT_PATH`。目标目录可用仓库变量
-`SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`。
+`SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`；若「软件集合」就在网盘根目录，
+把它设为 `/软件集合/rsiscsi`（以 `/` 开头即忽略 `WEBDAV_ROOT_PATH`）。
 
 CI 只在打标签或手动触发时运行，不消耗每次推送的 macOS 分钟数；本地仍可用
 `./scripts/package-dmg.sh` 生成同样的 DMG。
