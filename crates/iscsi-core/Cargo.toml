@@ -1,0 +1,21 @@
+[package]
+name = "iscsi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Async iSCSI initiator engine (RFC 7143) with a performance-oriented pipelined I/O path"
+
+[dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+crc32c = { workspace = true }
+md-5 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+socket2 = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
