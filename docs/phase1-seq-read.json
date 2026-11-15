@@ -1,0 +1,43 @@
+{
+  "block_size": 1048576,
+  "flush_seconds": 0.0,
+  "pattern": "seq-read",
+  "range_blocks": 8589934592,
+  "results": [
+    {
+      "bytes": 603979776,
+      "commands": 576,
+      "elapsed_seconds": 5.001660625,
+      "iops": 115.16175190314915,
+      "mib_per_second": 115.16175190314915,
+      "p50_latency_us": 4124.671,
+      "p95_latency_us": 15368.191,
+      "p99_latency_us": 192806.911,
+      "queue_depth": 1
+    },
+    {
+      "bytes": 1063256064,
+      "commands": 1014,
+      "elapsed_seconds": 5.055389167,
+      "iops": 200.57802999996022,
+      "mib_per_second": 200.57802999996022,
+      "p50_latency_us": 56819.711,
+      "p95_latency_us": 181665.791,
+      "p99_latency_us": 287834.111,
+      "queue_depth": 16
+    },
+    {
+      "bytes": 1166016512,
+      "commands": 1112,
+      "elapsed_seconds": 5.111605875,
+      "iops": 217.5441587620446,
+      "mib_per_second": 217.5441587620446,
+      "p50_latency_us": 113508.351,
+      "p95_latency_us": 308281.343,
+      "p99_latency_us": 430702.591,
+      "queue_depth": 32
+    }
+  ],
+  "start_lba": 0,
+  "warmup_seconds": 1.0
+}
