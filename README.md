@@ -103,11 +103,13 @@ CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
 - **支持开发**：下载集中到同一个分享页，便于累积赞助来覆盖 Apple Developer Program
   年费（当前全部为 ad-hoc 签名，见上一节）。
 
-CI 只构建并保留 workflow artifact（`rsiscsi-dmg`），不直接发布。发布必须在国内网络执行：
-城通对 WebDAV 登录做了地区风控，境外 IP 会收到
-`Access denied: Login from different location detected`。
+构建与发布都在 GitHub 托管的 `macos-latest` 上完成。城通对 WebDAV 登录做了地区风控，
+境外 IP 会收到 `Access denied: Login from different location detected`，所以
+`WEBDAV_URL` 指向一台国内 NAS 上的反向代理（转发到 `dav.ctfile.com`），配置与排查见
+[`docs/reverse-proxy.md`](docs/reverse-proxy.md)。
 
-把凭据写进 `.env.release`（已在 `.gitignore` 中，模板见 `.env.release.example`）：
+本地发布同样可用。凭据写进 `.env.release`（已在 `.gitignore` 中，
+模板见 `.env.release.example`）：
 
 ```sh
 WEBDAV_URL=https://dav.ctfile.com/ws35579

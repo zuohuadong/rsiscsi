@@ -106,11 +106,14 @@ GitHub Releases, for two reasons:
   accumulate sponsorship for the Apple Developer Program fee (everything is ad-hoc signed
   today, see the previous section).
 
-CI only builds and keeps a workflow artifact (`rsiscsi-dmg`); it does not publish. Publishing
-must run on a network in mainland China: CTFile rejects WebDAV logins from foreign IPs with
-`Access denied: Login from different location detected`.
+CI builds and publishes on the GitHub-hosted `macos-latest` runner. CTFile rejects WebDAV
+logins from foreign IPs with `Access denied: Login from different location detected`, so
+`WEBDAV_URL` points at a reverse proxy on a NAS in mainland China that forwards to
+`dav.ctfile.com`; see [`docs/reverse-proxy.md`](docs/reverse-proxy.md) for setup and
+troubleshooting.
 
-Put the credentials in `.env.release` (git-ignored, template in `.env.release.example`):
+The same flow runs locally. Put the credentials in `.env.release`
+(git-ignored, template in `.env.release.example`):
 
 ```sh
 WEBDAV_URL=https://dav.ctfile.com/ws35579

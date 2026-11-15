@@ -1,10 +1,9 @@
 name: Build DMG
 
-# Tag pushes and manual runs build the DMG and keep it as a workflow artifact.
-# Publishing happens outside CI: CTFile rejects WebDAV logins from foreign IPs,
-# so a machine in mainland China uploads the artifact with
-# scripts/release-local.sh. Binaries are intentionally not attached to GitHub
-# Releases: they are hosted on a domestic file-sharing drive so users in
+# Tag pushes build the DMG and publish it to the CTFile drive through a reverse
+# proxy that sits on a mainland China network (WEBDAV_URL): CTFile rejects direct
+# WebDAV logins from foreign IPs. Binaries are intentionally not attached to
+# GitHub Releases: they are hosted on a domestic file-sharing drive so users in
 # mainland China can download without a proxy, and so all traffic lands on one
 # page that also collects sponsorship for the Apple Developer Program fee.
 
@@ -66,6 +65,20 @@ jobs:
             dist/*.sha256
           retention-days: 30
 
+      - name: Publish to CTFile
+        env:
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+          WEBDAV_ROOT_PATH: ${{ secrets.WEBDAV_ROOT_PATH }}
+          SOFTWARE_COLLECTION_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR }}
+          VERSION: ${{ steps.collect.outputs.version }}
+          DMG: ${{ steps.collect.outputs.dmg }}
+        run: |
+          # WEBDAV_URL points at a domestic reverse proxy in front of
+          # dav.ctfile.com: CTFile rejects direct WebDAV logins from foreign IPs.
+          ./scripts/publish-webdav.sh
+
       - name: Summary
         run: |
           {
@@ -73,7 +86,5 @@ jobs:
             echo
             echo "Artifact: \`rsiscsi-dmg\` (\`${{ steps.collect.outputs.dmg }}\`)"
             echo
-            echo "Publishing runs outside CI: CTFile rejects WebDAV logins from"
-            echo "foreign IPs, so a machine in mainland China must run"
-            echo "\`scripts/release-local.sh\` or \`scripts/publish-webdav.sh\`."
+            echo "Published through the domestic reverse proxy in \`WEBDAV_URL\`."
           } >> "$GITHUB_STEP_SUMMARY"
