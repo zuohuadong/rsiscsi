@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/iscsi-core", "crates/iscsi-cli", "crates/iscsi-gui"]
+members = ["crates/iscsi-core", "crates/iscsi-cli", "crates/iscsi-gui", "crates/iscsi-blockd"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 iscsi-core = { path = "crates/iscsi-core" }
