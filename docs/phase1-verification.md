@@ -119,3 +119,40 @@ clean-code-guard 检查结果：
   对已通过协议测试的状态机进行大规模重构。
 
 clean-code-guard: 4 fixed, 1 flagged for author
+
+## NFS 对照（2026-11-15）
+
+同一台 NAS、同一台 Mac（10GbE，RTT 0.44 ms），全部只读。
+
+目标端只注册了 NFSv4（`rpcinfo` 显示 `program 100003 version 3 is not available`，
+`low version = 4, high version = 4`），因此 macOS 只能用 `vers=4.1` 挂载；
+默认参数会先试 v3，直接报 `Program version wrong`。
+
+```sh
+mount_nfs -o ro,vers=4.1 10.1.10.1:/Data /tmp/nfs-cached
+```
+
+NFS 侧测量脚本 `/tmp/nfs_bench.py`：`fcntl(F_NOCACHE)` 绕过本机页缓存，
+N 个线程各自 `pread` 1 秒预热后计时；iSCSI 侧用 `iscsi-rs bench`，同样 1 秒预热、6 秒正式。
+
+| 场景 | iSCSI | NFS |
+| --- | --- | --- |
+| 顺序 128 KiB QD8 | 168.7 MiB/s，1350 IOPS，p50 3.55 ms，p95 12.75 ms | 163.2 MiB/s，1306 IOPS，p50 3.66 ms，p95 15.51 ms |
+| 顺序 1 MiB QD8 | 152.8 MiB/s，p50 28.5 ms，p95 146 ms | 冷读 118.5 MiB/s（p50 62 ms）；重复读 252–291 MiB/s（p50 28 ms） |
+| 随机 4 KiB QD1 | 211 IOPS，p50 0.41 ms，p95 32.7 ms | 2484 IOPS，p50 0.35 ms，p95 0.79 ms |
+| 随机 4 KiB QD16 | 1685 IOPS，p50 2.40 ms，p95 51.0 ms | 2830 IOPS，p50 2.26 ms，p95 23.2 ms |
+| 本机页缓存命中（参考） | 无此层 | 4 KiB QD16 约 12.9k IOPS（受 Python 线程开销限制） |
+
+解读时需要注意三点，否则容易得出错误排名：
+
+1. 128 KiB 下两者几乎相同（169 对 163 MiB/s），说明 10GbE + NAS 后端的上限就在
+   165 MiB/s 附近，协议本身不是瓶颈。
+2. NFS 在 1 MiB 上的高值是 NAS 页缓存命中的结果：同一 2 GiB 文件被反复读后从
+   118 升到 252–291 MiB/s，而 iSCSI 读的是 LUN 裸块，不存在这层命中。
+3. 4 KiB 随机不可直接对比：NFS 读的是已被缓存的文件，iSCSI 在 4 TiB 裸盘上随机，
+   尾部延迟（p95 33–51 ms）来自机械盘寻道，不代表协议开销。
+
+结论：日常文件访问用 NFS，客户端自带页缓存、文件语义和成熟的错误恢复；
+iSCSI 用于顺序大块搬运和自有客户端验证，在 128 KiB 粒度上与 NFS 持平。
+在用户态给自有客户端加块缓存，最多只能追平 NFS 客户端已免费提供的那层能力。
+
