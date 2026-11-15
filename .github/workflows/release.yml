@@ -22,7 +22,8 @@ concurrency:
 jobs:
   build:
     # Apple silicon runner: the app and the optional kext are arm64 only.
-    runs-on: macos-14
+    # macos-latest resolves to an arm64 image on public repositories.
+    runs-on: macos-latest
     timeout-minutes: 60
     env:
       # Destination folder inside the WebDAV drive. Override with the repository
