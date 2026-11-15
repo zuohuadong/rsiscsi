@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use iscsi_core::{
-    BenchOptions, BenchPattern, ChapCredentials, Error, SessionOptions, Target, TargetAddr,
-    benchmark, discover_with_chap, login,
+    BenchOptions, BenchPattern, CacheConfig, ChapCredentials, Error, SessionOptions, Target,
+    TargetAddr, benchmark, discover_with_chap, login,
 };
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
@@ -27,6 +27,18 @@ struct Cli {
     /// 启用数据 CRC32C
     #[arg(long, global = true)]
     data_digest: bool,
+    /// 本地读缓存容量（默认关闭）
+    #[arg(long, global = true, default_value = "0", value_parser = parse_cache_size)]
+    cache_size: usize,
+    /// 危险：内存写回容量，崩溃或断电会丢失未刷写数据
+    #[arg(long, global = true, default_value = "0", value_parser = parse_cache_size)]
+    write_back: usize,
+    /// 写回刷写间隔（毫秒），仅写回开启时有效
+    #[arg(long, global = true)]
+    flush_interval: Option<u64>,
+    /// 确认破坏指定区域内的已有数据
+    #[arg(long, global = true)]
+    allow_destructive_write: bool,
 }
 
 #[derive(Subcommand)]
@@ -47,6 +59,9 @@ enum Command {
         blocks: u32,
         #[arg(long)]
         out: PathBuf,
+        /// 同一会话内重复读取；可验证本地读缓存命中
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
     },
     /// 测试吞吐量、IOPS 和延迟（写入会破坏数据）
     Bench {
@@ -70,9 +85,6 @@ enum Command {
         /// 限定测试区域的逻辑块数（写入测试必填）
         #[arg(long)]
         range_blocks: Option<u64>,
-        /// 确认破坏指定区域内的已有数据
-        #[arg(long)]
-        allow_destructive_write: bool,
     },
 }
 
@@ -150,6 +162,15 @@ impl From<Pattern> for BenchPattern {
 }
 
 fn parse_size(input: &str) -> Result<usize, String> {
+    let size = parse_byte_size(input)?;
+    if size == 0 || size > u32::MAX as usize {
+        Err("块大小超出范围".into())
+    } else {
+        Ok(size)
+    }
+}
+
+fn parse_byte_size(input: &str) -> Result<usize, String> {
     let split = input
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(input.len());
@@ -167,8 +188,32 @@ fn parse_size(input: &str) -> Result<usize, String> {
     };
     number
         .checked_mul(multiplier)
-        .filter(|n| *n > 0 && *n <= u32::MAX as usize)
         .ok_or_else(|| "块大小超出范围".into())
+}
+
+fn parse_cache_size(input: &str) -> Result<usize, String> {
+    parse_byte_size(input)
+}
+
+fn cache_config(cli: &Cli) -> Result<CacheConfig, Error> {
+    if cli.write_back > 0 && !cli.allow_destructive_write {
+        return Err(Error::Config(
+            "--write-back 必须同时指定 --allow-destructive-write".into(),
+        ));
+    }
+    if cli.flush_interval.is_some() && cli.write_back == 0 {
+        return Err(Error::Config(
+            "--flush-interval 仅在 --write-back 开启时有效".into(),
+        ));
+    }
+    if cli.flush_interval == Some(0) {
+        return Err(Error::Config("--flush-interval 必须大于 0".into()));
+    }
+    Ok(CacheConfig {
+        read_capacity_bytes: cli.cache_size,
+        write_back_capacity_bytes: cli.write_back,
+        flush_interval: cli.flush_interval.map(Duration::from_millis),
+    })
 }
 
 struct Failure {
@@ -227,6 +272,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: &Cli) -> Result<(), Failure> {
+    let cache_config = cache_config(cli)?;
+    if let Command::Read { repeat: 0, .. } = cli.command {
+        return Err(Error::Config("--repeat 必须大于 0".into()).into());
+    }
     let mut opts = SessionOptions {
         nodelay: cli.nodelay,
         header_digest: cli.header_digest,
@@ -259,7 +308,6 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
     // Reject a destructive benchmark before any network or SCSI activity.
     if let Command::Bench {
         pattern,
-        allow_destructive_write,
         range_blocks,
         qd,
         duration,
@@ -267,7 +315,7 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
     } = &cli.command
     {
         if BenchPattern::from(*pattern).is_write()
-            && (!allow_destructive_write || range_blocks.is_none())
+            && (!cli.allow_destructive_write || range_blocks.is_none())
         {
             return Err(Error::Config(
                 "写入测试必须指定 --allow-destructive-write 和 --range-blocks".into(),
@@ -278,7 +326,11 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
             return Err(Error::Config("无效的测试时长或队列深度".into()).into());
         }
     }
-    let session = login(&args.target(), &opts).await?;
+    let mut session = login(&args.target(), &opts).await?;
+    session.try_enable_cache(cache_config)?;
+    if cli.write_back > 0 {
+        eprintln!("警告：写回缓存已开启，崩溃或断电会丢失未刷写的写入");
+    }
     let result: Result<(), Failure> = async {
         match &cli.command {
             Command::Ls(_) => {
@@ -303,22 +355,45 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                     println!("协商参数：{}", serde_json::to_string_pretty(session.negotiated()).map_err(io_failure)?);
                 }
             }
-            Command::Read { lba, blocks, out, .. } => {
+            Command::Read { lba, blocks, out, repeat, .. } => {
                 let capacity = session.capacity().await.map_err(io_failure)?;
                 if lba.checked_add(u64::from(*blocks)).is_none_or(|end| end > capacity.blocks) {
                     return Err(Error::Config("读取范围超出逻辑单元".into()).into());
                 }
-                let data = session.read_pooled(*lba, *blocks).await.map_err(command_failure)?;
-                tokio::fs::write(out, &*data).await.map_err(io_failure)?;
-                if cli.json { println!("{}", json!({"bytes": data.len(), "lba": lba, "blocks": blocks, "out": out})); }
-                else { println!("已读取 {} 字节至 {}", data.len(), out.display()); }
+                let mut bytes = 0;
+                for _ in 0..*repeat {
+                    if cli.cache_size > 0 {
+                        let data = session.read_cached(*lba, *blocks).await.map_err(command_failure)?;
+                        bytes = data.len();
+                        tokio::fs::write(out, &data).await.map_err(io_failure)?;
+                    } else {
+                        let data = session.read_pooled(*lba, *blocks).await.map_err(command_failure)?;
+                        bytes = data.len();
+                        tokio::fs::write(out, &*data).await.map_err(io_failure)?;
+                    }
+                }
+                if cli.json {
+                    let mut output = json!({"bytes": bytes, "lba": lba, "blocks": blocks, "out": out});
+                    if cli.cache_size > 0 {
+                        output["cache"] = json!(session.cache_stats());
+                        output["cache_hit_rate"] = json!(session.cache_stats().hit_rate());
+                    }
+                    println!("{output}");
+                } else {
+                    println!("已读取 {} 字节至 {}", bytes, out.display());
+                    if cli.cache_size > 0 {
+                        let stats = session.cache_stats();
+                        println!("本地读缓存命中率：{:.2}%（命中 {} B / LUN 读取 {} B）",
+                            stats.hit_rate() * 100., stats.hits, stats.misses);
+                    }
+                }
             }
-            Command::Bench { pattern, bs, qd, duration, warmup, start_lba, range_blocks, allow_destructive_write, .. } => {
+            Command::Bench { pattern, bs, qd, duration, warmup, start_lba, range_blocks, .. } => {
                 let report = benchmark(&session, BenchOptions {
                     pattern: (*pattern).into(), block_size: *bs, queue_depths: qd.clone(),
                     duration: Duration::from_secs(*duration), warmup: Duration::from_secs(*warmup),
                     start_lba: *start_lba, range_blocks: *range_blocks,
-                    allow_destructive_write: *allow_destructive_write,
+                    allow_destructive_write: cli.allow_destructive_write,
                 }).await.map_err(command_failure)?;
                 if cli.json { println!("{}", json!(report)); }
                 else {
@@ -328,14 +403,45 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                             r.queue_depth, r.mib_per_second, r.iops, r.p50_latency_us, r.p95_latency_us, r.p99_latency_us);
                     }
                     if report.flush_seconds > 0.0 { println!("缓存同步：{:.3} 秒", report.flush_seconds); }
+                    if session.cache_config().enabled() {
+                        println!("本地缓存：命中 {:.2}% / 脏数据 {} B / 同步 {} 次",
+                            report.cache.hit_rate() * 100., report.cache.dirty_bytes, report.cache.flushes);
+                    }
                 }
             }
             Command::Discover(_) => {}
         }
         Ok(())
     }.await;
-    let logout_result = session.logout().await.map_err(io_failure);
-    result.and(logout_result)
+    let logout_result = session.clone().logout().await.map_err(io_failure);
+    let dirty = session.cache_stats().dirty_bytes;
+    finish_session_result(result, logout_result, dirty)
+}
+
+fn finish_session_result(
+    result: Result<(), Failure>,
+    logout_result: Result<(), Failure>,
+    dirty: usize,
+) -> Result<(), Failure> {
+    match (result, logout_result) {
+        (Err(mut failure), Err(logout)) => {
+            failure.code = logout.code;
+            failure.message = format!(
+                "{}；退出失败：{}；未刷写 {} B，进程退出将丢失这些内存数据",
+                failure.message, logout.message, dirty
+            );
+            Err(failure)
+        }
+        (Ok(()), Err(mut failure)) => {
+            failure.message = format!(
+                "{}；未刷写 {} B，进程退出将丢失这些内存数据",
+                failure.message, dirty
+            );
+            Err(failure)
+        }
+        (Err(failure), Ok(())) => Err(failure),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +476,50 @@ mod tests {
         assert_eq!(parse_size("4KiB").unwrap(), 4096);
         assert!(parse_size("0").is_err());
         assert!(parse_size("999999999999GiB").is_err());
+        assert_eq!(parse_cache_size("0").unwrap(), 0);
+        assert_eq!(parse_cache_size("0MiB").unwrap(), 0);
+        assert_eq!(parse_cache_size("64KiB").unwrap(), 65536);
+        assert_eq!(parse_cache_size("8GiB").unwrap(), 8 * 1_073_741_824);
+        assert!(parse_size("8GiB").is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_safety_rejects_before_network_and_preserves_defaults() {
+        let defaults =
+            Cli::try_parse_from(["iscsi-rs", "inq", "--host", "invalid", "--iqn", "i"]).unwrap();
+        assert_eq!(cache_config(&defaults).unwrap(), CacheConfig::default());
+        for flags in [
+            vec!["--write-back", "1MiB"],
+            vec!["--flush-interval", "10"],
+            vec![
+                "--write-back",
+                "1MiB",
+                "--allow-destructive-write",
+                "--flush-interval",
+                "0",
+            ],
+        ] {
+            let mut args = vec!["iscsi-rs", "inq", "--host", "invalid", "--iqn", "i"];
+            args.extend(flags);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(run(&cli).await.err().unwrap().code, 2);
+        }
+        let cli = Cli::try_parse_from([
+            "iscsi-rs",
+            "--allow-destructive-write",
+            "bench",
+            "--host",
+            "invalid",
+            "--iqn",
+            "i",
+            "--write-back",
+            "1MiB",
+        ])
+        .unwrap();
+        assert_eq!(
+            cache_config(&cli).unwrap().write_back_capacity_bytes,
+            1_048_576
+        );
     }
 
     #[test]
@@ -392,6 +542,24 @@ mod tests {
             })
             .code,
             5
+        );
+        let failure = finish_session_result(
+            Err(Failure::from(Error::Config("command invalid".into()))),
+            Err(io_failure("sync failed")),
+            65536,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.code, 5);
+        assert!(failure.message.contains("command invalid"));
+        assert!(failure.message.contains("sync failed"));
+        assert!(failure.message.contains("65536"));
+        assert_eq!(
+            finish_session_result(Err(Failure::from(Error::Config("bad".into()))), Ok(()), 0,)
+                .err()
+                .unwrap()
+                .code,
+            2
         );
     }
 }
