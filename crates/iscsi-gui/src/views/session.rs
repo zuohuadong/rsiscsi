@@ -77,6 +77,7 @@ impl Desktop {
                         cx,
                     ));
             }
+            panel = panel.child(self.disk_section(cx));
             let inquiry = &connection.inquiry;
             panel = panel
                 .child(heading("逻辑单元"))
@@ -134,6 +135,96 @@ impl Desktop {
                     .map(|line| div().text_xs().child(line.clone())),
             ),
         )
+    }
+
+    fn disk_section(&self, cx: &mut Context<Self>) -> Div {
+        let mut section = v_flex().gap_1().child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(heading("磁盘"))
+                .child(
+                    Button::new("scan-disks")
+                        .small()
+                        .label(if self.disks_scanning {
+                            "扫描中…"
+                        } else {
+                            "刷新"
+                        })
+                        .disabled(self.disks_scanning)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_disks(cx))),
+                ),
+        );
+        if let Some(error) = &self.disks_error {
+            section = section.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(error.clone()),
+            );
+        } else if self.disks.is_empty() {
+            section = section.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("未发现新的块设备。本应用不创建磁盘；需 iSCSIKit 等 DriverKit 扩展把 LUN 挂成磁盘后才会出现在这里。"),
+            );
+        }
+        for (index, disk) in self.disks.iter().enumerate() {
+            let mut row = v_flex().gap_1().py(px(4.)).child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(format!("{} · {}", disk.node(), disk.size_text())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if disk.mount_point().is_some() {
+                                cx.theme().success
+                            } else {
+                                cx.theme().warning
+                            })
+                            .child(disk.status()),
+                    ),
+            );
+            if let Some(mount) = disk.mount_point().cloned() {
+                row = row.child(
+                    Button::new(("finder", index))
+                        .small()
+                        .label("在 Finder 中打开")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(error) = crate::disks::reveal(&mount) {
+                                this.log(format!("无法打开 Finder：{error}"));
+                            }
+                            cx.notify();
+                        })),
+                );
+            } else {
+                row = row
+                    .child(
+                        Button::new(("disk-utility", index))
+                            .small()
+                            .label("打开磁盘工具")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Err(error) = crate::disks::open_disk_utility() {
+                                    this.log(format!("无法打开磁盘工具：{error}"));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child("初始化会清空该磁盘；本应用不会自动抹掉。"),
+                    );
+            }
+            section = section.child(row);
+        }
+        section
     }
 
     fn start_connect(&mut self, cx: &mut Context<Self>) {

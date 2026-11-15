@@ -1,4 +1,7 @@
-use crate::state::{Config, SavedTarget, config_path, load_config, save_config};
+use crate::{
+    disks::DiskEntry,
+    state::{Config, SavedTarget, config_path, load_config, save_config},
+};
 use iscsi_core::{
     BenchOptions, BenchReport, BenchmarkCancellation, CacheConfig, CacheMode, Capacity,
     DiscoveredTarget, InquiryData, Session, benchmark_cancellable, discover_with_chap, login,
@@ -29,6 +32,7 @@ pub enum Event {
     },
     ConnectionClosed(u64),
     BenchFinished(Result<Option<BenchReport>, String>),
+    Disks(Result<Vec<DiskEntry>, String>),
 }
 
 pub struct Engine {
@@ -102,6 +106,17 @@ impl Engine {
     pub fn connect(&mut self, target: SavedTarget) {
         self.spawn(async move {
             Event::Connected(connect(target).await.map_err(|error| error.to_string()))
+        });
+    }
+
+    /// 只读扫描：找出连接后新出现的块设备。不会初始化或挂载任何东西。
+    pub fn scan_disks(&mut self, known: Vec<String>) {
+        let runtime = self.runtime.clone();
+        self.spawn(async move {
+            let found = runtime
+                .spawn_blocking(move || crate::disks::discover(&known))
+                .await;
+            Event::Disks(flatten(found))
         });
     }
 

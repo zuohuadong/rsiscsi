@@ -5,6 +5,7 @@ mod sidebar;
 mod updates;
 
 use crate::{
+    disks::DiskEntry,
     engine::{Connection, Engine},
     state::{Config, Operation},
 };
@@ -48,6 +49,10 @@ pub struct Desktop {
     closing: bool,
     pending_target: Option<usize>,
     last_cache_error: Option<String>,
+    known_disks: Vec<String>,
+    disks: Vec<DiskEntry>,
+    disks_error: Option<String>,
+    disks_scanning: bool,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -115,6 +120,10 @@ impl Desktop {
             closing: false,
             pending_target: None,
             last_cache_error: None,
+            known_disks: crate::disks::whole_disks().unwrap_or_default(),
+            disks: Vec::new(),
+            disks_error: None,
+            disks_scanning: false,
             _events: event_task,
             _subscriptions: subscriptions,
         }
@@ -148,6 +157,16 @@ impl Desktop {
         self.bench_form.allow_write = false;
         self.bench_form.write_back = false;
         self.last_cache_error = None;
+        self.disks.clear();
+        self.disks_error = None;
+        self.disks_scanning = false;
+    }
+
+    fn refresh_disks(&mut self, cx: &mut Context<Self>) {
+        self.disks_scanning = true;
+        self.disks_error = None;
+        self.engine.scan_disks(self.known_disks.clone());
+        cx.notify();
     }
 
     fn start_disconnect(&mut self, cx: &mut Context<Self>) {

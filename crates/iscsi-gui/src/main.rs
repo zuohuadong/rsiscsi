@@ -1,3 +1,4 @@
+mod disks;
 mod engine;
 mod state;
 mod termination;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine::Event;
+use crate::{disks::DiskState, engine::Event};
 
 impl Desktop {
     pub(super) fn apply_event(
@@ -98,6 +98,30 @@ impl Desktop {
                     }
                 }
             }
+            Event::Disks(outcome) => {
+                self.disks_scanning = false;
+                match outcome {
+                    Ok(disks) => {
+                        for disk in &disks {
+                            if let DiskState::Blank = disk.state {
+                                self.log(format!(
+                                    "{} 未初始化；请在磁盘工具中确认后抹掉",
+                                    disk.node()
+                                ));
+                            }
+                        }
+                        if !disks.is_empty() {
+                            self.log(format!("发现 {} 个新的块设备", disks.len()));
+                        }
+                        self.disks = disks;
+                        self.disks_error = None;
+                    }
+                    Err(message) => {
+                        self.log(format!("磁盘探测失败：{message}"));
+                        self.disks_error = Some(message);
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -156,6 +180,7 @@ impl Desktop {
                 );
                 self.connection = Some(connection);
                 self.log("连接成功；设备信息已读取");
+                self.refresh_disks(cx);
                 if self.closing {
                     self.start_disconnect(cx);
                 }

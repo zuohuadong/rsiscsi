@@ -123,6 +123,18 @@ GUI 基准页读缓存默认「自动（推荐）」，写回默认关闭（预�
 此前 NAS 后端约 165 MiB/s 的只读对照不能通过低命中率的客户端缓存消除。
 测量方法及本轮只读验收见 [`docs/local-cache.md`](docs/local-cache.md)。
 
+### 磁盘可见性
+
+连接只建立 SCSI 会话，不创建 `/dev/disk*`，也不挂载文件系统，所以磁盘工具和 Finder
+看不到它。要让 LUN 以块设备出现，需要 macOS 的 DriverKit SCSI 扩展（例如 iSCSIKit）
+先完成 attach。连接成功后，「会话」页的「磁盘」区块会只读扫描 `diskutil`：
+
+- 新出现且无分区表的盘标记「未初始化」，提供「打开磁盘工具」；
+  初始化由用户在磁盘工具里确认，应用绝不自动抹掉。
+- 已有文件系统并挂载的盘显示卷挂载点，提供「在 Finder 中打开」。
+- 扫描只调用 `diskutil list -plist` 并转成 JSON，不写任何磁盘；
+  「刷新」可重新扫描，连接断开时清空结果。
+
 ## 核心设计
 
 - 每连接一个 Tokio socket owner，mpsc 入队、Semaphore 限流、ITT 槽位和代际编号；
@@ -182,6 +194,7 @@ crates/iscsi-core/src/wire.rs         BHS/PDU、CRC32C、文本键、CHAP 编解
 crates/iscsi-core/src/login.rs        TCP 调优、分阶段登录、CHAP 和参数/窗口协商
 crates/iscsi-core/src/session.rs      会话 API、socket owner、ITT 流水线与 SCSI 传输
 crates/iscsi-core/src/cache.rs        可开关的段 LRU、脏段、统计与自动容量
+crates/iscsi-gui/src/disks.rs         只读 diskutil 探测：空白盘引导与 Finder 打开
 crates/iscsi-core/src/scsi.rs         CDB、LUN、INQUIRY/VPD 和容量解析
 crates/iscsi-core/src/pool.rs         有界可复用缓冲区缓存
 crates/iscsi-core/src/stats.rs        原子计数与 EWMA 采样
@@ -196,7 +209,7 @@ crates/iscsi-gui/src/engine.rs        Tokio 运行时桥、事件通道、取消
 crates/iscsi-gui/src/views/mod.rs     窗口骨架：标题栏、侧栏、标签、状态栏
 crates/iscsi-gui/src/views/sidebar.rs 目标列表与发现面板
 crates/iscsi-gui/src/views/editor.rs  目标编辑表单与 URL 导入
-crates/iscsi-gui/src/views/session.rs 会话控制、设备信息、协商参数与日志
+crates/iscsi-gui/src/views/session.rs 会话控制、设备信息、磁盘引导、协商参数与日志
 crates/iscsi-gui/src/views/benchmark.rs 基准表单、结果与吞吐量柱状图
 crates/iscsi-gui/src/views/updates.rs 后台事件到 UI 状态的归约
 ```
