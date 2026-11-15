@@ -1,7 +1,8 @@
 use crate::{
-    BufferPool, CacheMode, Capacity, ChapCredentials, DiscoveredTarget, Error, InquiryData,
-    NegotiatedParams, PooledBuffer, SessionOptions, SessionStats, StatsSnapshot, Target,
-    TargetAddr,
+    BufferPool, Cache, CacheConfig, CacheMode, CacheStats, Capacity, ChapCredentials,
+    DiscoveredTarget, Error, InquiryData, NegotiatedParams, PooledBuffer, SessionOptions,
+    SessionStats, StatsSnapshot, Target, TargetAddr,
+    cache::{MAX_BATCH_BYTES, SEGMENT_BYTES},
     login::{self, Connection},
     scsi,
     stats::Stats,
@@ -10,13 +11,13 @@ use crate::{
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::{
     io::AsyncWriteExt,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot},
     time::{interval, timeout},
 };
 
@@ -39,7 +40,16 @@ struct Inner {
     start: Instant,
     pool: BufferPool,
     block_size: AtomicU32,
+    capacity_blocks: AtomicU64,
     closed: Arc<AtomicBool>,
+    cache: Cache,
+    cache_enabled: AtomicBool,
+    cache_generation: AtomicU64,
+    cache_commit: AtomicU64,
+    cache_unsynced_write: AtomicBool,
+    // I/O ordering only; cache state itself uses a std::sync::Mutex.
+    cache_io: RwLock<()>,
+    runtime: tokio::runtime::Handle,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +80,21 @@ struct Pending {
     start: Instant,
 }
 
+struct CancelledCacheIo<'a> {
+    closed: &'a AtomicBool,
+    armed: bool,
+}
+
+impl Drop for CancelledCacheIo<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // The socket actor may still own an issued write/sync after its
+            // waiter disappears. Do not serve cache hits on an uncertain LUN.
+            self.closed.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Authenticate and negotiate a normal session. No SCSI writes are issued.
 pub async fn login(target: &Target, opts: &SessionOptions) -> Result<Session, Error> {
     scsi::lun_bytes(target.lun)?;
@@ -87,7 +112,15 @@ pub async fn login(target: &Target, opts: &SessionOptions) -> Result<Session, Er
         start: Instant::now(),
         pool: BufferPool::new(opts.queue_depth, 16 * 1024 * 1024),
         block_size: AtomicU32::new(0),
+        capacity_blocks: AtomicU64::new(0),
         closed: Arc::new(AtomicBool::new(false)),
+        cache: Cache::default(),
+        cache_enabled: AtomicBool::new(false),
+        cache_generation: AtomicU64::new(0),
+        cache_commit: AtomicU64::new(0),
+        cache_unsynced_write: AtomicBool::new(false),
+        cache_io: RwLock::new(()),
+        runtime: tokio::runtime::Handle::current(),
     });
     // The actor intentionally holds no Arc<Inner>, so the final handle closes rx.
     tokio::spawn(run_connection(
@@ -212,6 +245,77 @@ async fn logout_connection(conn: &mut Connection, tag: u32) -> Result<(), Error>
 }
 
 impl Session {
+    /// Configure an idle, clean session. A rejected reconfiguration preserves
+    /// the previous cache (including dirty data); use try_enable_cache for errors.
+    pub fn enable_cache(&mut self, config: CacheConfig) {
+        if let Err(error) = self.try_enable_cache(config) {
+            tracing::error!(%error, "cache configuration unchanged");
+        }
+    }
+
+    pub fn try_enable_cache(&mut self, config: CacheConfig) -> Result<(), Error> {
+        let _barrier = self
+            .inner
+            .cache_io
+            .try_write()
+            .map_err(|_| Error::Config("cache I/O is active".into()))?;
+        if self.is_closed() {
+            return Err(Error::Protocol("session closed".into()));
+        }
+        // Permits stay with actor-owned requests even after a waiter is
+        // cancelled, so the write barrier alone is not an idle-session proof.
+        if self.inner.permits.available_permits() != self.queue_depth() {
+            return Err(Error::Config(
+                "commands are still owned by the connection task".into(),
+            ));
+        }
+        self.inner.cache.lock().configure(config.clone())?;
+        self.inner
+            .cache_enabled
+            .store(config.enabled(), Ordering::Release);
+        let generation = self.inner.cache_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if config.write_back_capacity_bytes > 0
+            && let Some(interval) = config.flush_interval
+        {
+            self.start_cache_timer(interval, generation);
+        }
+        Ok(())
+    }
+
+    fn start_cache_timer(&self, interval: Duration, generation: u64) {
+        let weak = Arc::downgrade(&self.inner);
+        self.inner.runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let Some(inner) = weak.upgrade() else { break };
+                let session = Session { inner };
+                let _barrier = session.inner.cache_io.write().await;
+                if session.is_closed()
+                    || session.inner.cache_generation.load(Ordering::Acquire) != generation
+                {
+                    break;
+                }
+                if session.cache_stats().dirty_bytes > 0
+                    && let Err(error) = session.flush_dirty().await
+                {
+                    tracing::error!(%error, "periodic cache flush failed; dirty data retained");
+                }
+            }
+        });
+    }
+
+    pub fn cache_config(&self) -> CacheConfig {
+        self.inner.cache.lock().config.clone()
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        self.inner.cache.stats()
+    }
+
+    pub fn cache_flush_error(&self) -> Option<String> {
+        self.inner.cache.lock().flush_error.clone()
+    }
+
     /// Observe transport/protocol termination without issuing any SCSI command.
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
@@ -393,6 +497,20 @@ impl Session {
         if capacity.block_size == 0 {
             return Err(Error::Protocol("zero block size".into()));
         }
+        let previous_size = self.inner.block_size.load(Ordering::Acquire);
+        let previous_blocks = self.inner.capacity_blocks.load(Ordering::Acquire);
+        if self.inner.cache_enabled.load(Ordering::Acquire)
+            && previous_size != 0
+            && (previous_size != capacity.block_size || previous_blocks != capacity.blocks)
+        {
+            self.inner.closed.store(true, Ordering::Release);
+            return Err(Error::Protocol(
+                "LUN geometry changed; reconnect required (dirty data retained)".into(),
+            ));
+        }
+        self.inner
+            .capacity_blocks
+            .store(capacity.blocks, Ordering::Release);
         self.inner
             .block_size
             .store(capacity.block_size, Ordering::Release);
@@ -410,6 +528,112 @@ impl Session {
 
     pub async fn read(&self, lba: u64, blocks: u32) -> Result<Vec<u8>, Error> {
         Ok(self.read_pooled(lba, blocks).await?.to_vec())
+    }
+
+    /// Only whole 64 KiB segments participate. Dirty segments provide
+    /// read-your-writes; the raw pooled APIs deliberately bypass this layer.
+    pub async fn read_cached(&self, lba: u64, blocks: u32) -> Result<Vec<u8>, Error> {
+        let barrier = self.inner.cache_io.read().await;
+        if !self.inner.cache_enabled.load(Ordering::Acquire) {
+            return self.read(lba, blocks).await;
+        }
+        let block_size = self.block_size().await?;
+        let len = transfer_len(blocks, block_size)?;
+        let offset = cache_offset(lba, blocks, block_size)?;
+        if !cache_aligned(offset, len, block_size) {
+            drop(barrier);
+            let _barrier = self.inner.cache_io.write().await;
+            if self.cache_stats().dirty_bytes > 0 {
+                self.flush_dirty().await?;
+            }
+            let data = self.read(lba, blocks).await?;
+            self.inner.cache.lock().miss(data.len());
+            return Ok(data);
+        }
+        if self.is_closed() {
+            return Err(Error::Protocol("session closed".into()));
+        }
+        let mut result = vec![0; len];
+        let mut cursor = 0;
+        while cursor < len {
+            let segment = offset + cursor as u64;
+            let hit = self.inner.cache.lock().get(segment);
+            if let Some(data) = hit {
+                result[cursor..cursor + SEGMENT_BYTES].copy_from_slice(&data);
+                cursor += SEGMENT_BYTES;
+                continue;
+            }
+            let mut end = cursor + SEGMENT_BYTES;
+            {
+                let state = self.inner.cache.lock();
+                while end < len
+                    && end - cursor < MAX_BATCH_BYTES
+                    && !state.contains(offset + end as u64)
+                {
+                    end += SEGMENT_BYTES;
+                }
+            }
+            let data = self
+                .read(
+                    lba + (cursor / block_size as usize) as u64,
+                    ((end - cursor) / block_size as usize) as u32,
+                )
+                .await?;
+            result[cursor..end].copy_from_slice(&data);
+            {
+                let mut state = self.inner.cache.lock();
+                state.miss(data.len());
+                for (index, chunk) in data.as_chunks::<SEGMENT_BYTES>().0.iter().enumerate() {
+                    state.insert(segment + (index * SEGMENT_BYTES) as u64, chunk);
+                }
+            }
+            cursor = end;
+        }
+        Ok(result)
+    }
+
+    /// Dangerous when write-back is enabled: completion can mean only RAM.
+    pub async fn write_cached(&self, lba: u64, data: &[u8]) -> Result<(), Error> {
+        let barrier = self.inner.cache_io.read().await;
+        if !self.inner.cache_enabled.load(Ordering::Acquire) {
+            let mut buffer = self.inner.pool.acquire(data.len());
+            buffer.copy_from_slice(data);
+            return self.write_buffer_raw(lba, buffer).await.map(|_| ());
+        }
+        let block_size = self.block_size().await?;
+        let blocks = write_blocks(data.len(), block_size)?;
+        let offset = cache_offset(lba, blocks, block_size)?;
+        drop(barrier);
+        let _barrier = self.inner.cache_io.write().await;
+        if self.is_closed() {
+            return Err(Error::Protocol("session closed".into()));
+        }
+        let capacity = self.inner.cache.lock().config.write_back_capacity_bytes;
+        if capacity > 0 && cache_aligned(offset, data.len(), block_size) {
+            if lba + u64::from(blocks) > self.inner.capacity_blocks.load(Ordering::Acquire) {
+                return Err(Error::Config(
+                    "write-back range exceeds LUN capacity".into(),
+                ));
+            }
+            {
+                let mut state = self.inner.cache.lock();
+                state.stage(offset, data);
+            }
+            if self.cache_stats().dirty_bytes > capacity {
+                self.flush_dirty().await?;
+            }
+            return Ok(());
+        }
+        // A bypassing write must not later be overwritten by older dirty data.
+        if self.cache_stats().dirty_bytes > 0 {
+            self.flush_dirty().await?;
+        }
+        self.inner.cache.lock().invalidate(offset, data.len());
+        let mut buffer = self.inner.pool.acquire(data.len());
+        buffer.copy_from_slice(data);
+        self.write_buffer_raw(lba, buffer).await?;
+        self.inner.cache.lock().stats.write_bytes += data.len() as u64;
+        Ok(())
     }
 
     /// Read directly from the socket into a reusable owned buffer.
@@ -465,36 +689,135 @@ impl Session {
 
     /// Write an owned buffer and return it after target completion for reuse.
     pub async fn write_buffer(&self, lba: u64, data: PooledBuffer) -> Result<PooledBuffer, Error> {
-        let block_size = self.block_size().await? as usize;
-        if data.is_empty()
-            || !data.len().is_multiple_of(block_size)
-            || data.len() > u32::MAX as usize
-        {
-            return Err(Error::Config(
-                "write must contain whole logical blocks".into(),
-            ));
+        let barrier = self.inner.cache_io.read().await;
+        if self.inner.cache_enabled.load(Ordering::Acquire) {
+            let block_size = self.block_size().await?;
+            let blocks = write_blocks(data.len(), block_size)?;
+            let offset = cache_offset(lba, blocks, block_size)?;
+            drop(barrier);
+            let _barrier = self.inner.cache_io.write().await;
+            if self.cache_stats().dirty_bytes > 0 {
+                self.flush_dirty().await?;
+            }
+            // Invalidate before issuing I/O, including uncertain/failed writes.
+            self.inner.cache.lock().invalidate(offset, data.len());
+            let data = self.write_buffer_raw(lba, data).await?;
+            self.inner.cache.lock().stats.write_bytes += data.len() as u64;
+            return Ok(data);
         }
-        let blocks = (data.len() / block_size) as u32;
+        self.write_buffer_raw(lba, data).await
+    }
+
+    async fn write_buffer_raw(&self, lba: u64, data: PooledBuffer) -> Result<PooledBuffer, Error> {
+        let blocks = write_blocks(data.len(), self.block_size().await?)?;
         lba.checked_add(u64::from(blocks))
             .ok_or_else(|| Error::Config("LBA overflow".into()))?;
-        self.execute(
-            scsi::rw_cdb(0x8a, lba, blocks),
-            Direction::Write,
-            data,
-            false,
-            self.inner.lun,
-        )
-        .await
+        let mut cancellation = CancelledCacheIo {
+            closed: &self.inner.closed,
+            armed: self.inner.cache_enabled.load(Ordering::Acquire),
+        };
+        self.inner
+            .cache_unsynced_write
+            .store(true, Ordering::Release);
+        let outcome = self
+            .execute(
+                scsi::rw_cdb(0x8a, lba, blocks),
+                Direction::Write,
+                data,
+                false,
+                self.inner.lun,
+            )
+            .await;
+        cancellation.armed = false;
+        outcome
     }
 
     pub async fn flush(&self) -> Result<(), Error> {
+        let generation = self.inner.cache_generation.load(Ordering::Acquire);
+        let before = self.inner.cache_commit.load(Ordering::Acquire);
+        let barrier = self.inner.cache_io.read().await;
+        if !self.inner.cache_enabled.load(Ordering::Acquire) {
+            return self.synchronize().await;
+        }
+        drop(barrier);
+        let _barrier = self.inner.cache_io.write().await;
+        // Concurrent flush callers can share a successfully completed commit.
+        if self.inner.cache_generation.load(Ordering::Acquire) == generation
+            && self.inner.cache_commit.load(Ordering::Acquire) != before
+            && self.cache_stats().dirty_bytes == 0
+            && !self.inner.cache_unsynced_write.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        self.flush_dirty().await
+    }
+
+    async fn synchronize(&self) -> Result<(), Error> {
         let mut cdb = [0; 16];
         cdb[0] = 0x91;
         self.command(cdb, 0, self.inner.lun).await?;
         Ok(())
     }
 
+    // Caller holds cache_io exclusively. Nothing is removed until every write
+    // and the final synchronization have succeeded; cancellation retains it too.
+    async fn flush_dirty(&self) -> Result<(), Error> {
+        let mut cancellation = CancelledCacheIo {
+            closed: &self.inner.closed,
+            armed: true,
+        };
+        let outcome: Result<(), Error> = async {
+            let dirty: Vec<_> = self
+                .inner
+                .cache
+                .lock()
+                .dirty
+                .iter()
+                .map(|(&offset, data)| (offset, data.clone()))
+                .collect();
+            if !dirty.is_empty() {
+                let block_size = self.block_size().await? as usize;
+                let mut index = 0;
+                while index < dirty.len() {
+                    let offset = dirty[index].0;
+                    let mut data = Vec::with_capacity(MAX_BATCH_BYTES);
+                    while index < dirty.len()
+                        && dirty[index].0 == offset + data.len() as u64
+                        && data.len() < MAX_BATCH_BYTES
+                    {
+                        data.extend_from_slice(&dirty[index].1);
+                        index += 1;
+                    }
+                    self.inner.cache.lock().invalidate(offset, data.len());
+                    let mut buffer = self.inner.pool.acquire(data.len());
+                    buffer.copy_from_slice(&data);
+                    self.write_buffer_raw(offset / block_size as u64, buffer)
+                        .await?;
+                }
+            }
+            self.synchronize().await
+        }
+        .await;
+        cancellation.armed = false;
+        let mut state = self.inner.cache.lock();
+        match &outcome {
+            Ok(()) => {
+                state.flushed();
+                self.inner
+                    .cache_unsynced_write
+                    .store(false, Ordering::Release);
+                self.inner.cache_commit.fetch_add(1, Ordering::Release);
+            }
+            Err(error) => state.flush_error = Some(error.to_string()),
+        }
+        outcome
+    }
+
     pub async fn logout(self) -> Result<(), Error> {
+        let _barrier = self.inner.cache_io.write().await;
+        if self.cache_stats().dirty_bytes > 0 {
+            self.flush_dirty().await?;
+        }
         self.execute(
             [0; 16],
             Direction::Logout,
@@ -505,8 +828,34 @@ impl Session {
         .await?;
         self.inner.closed.store(true, Ordering::Release);
         self.inner.permits.close();
+        self.inner.cache_generation.fetch_add(1, Ordering::AcqRel);
+        // A new login always owns a fresh cache; never carry clean data across targets.
+        self.inner.cache.lock().configure(CacheConfig::default())?;
         Ok(())
     }
+}
+
+fn cache_offset(lba: u64, blocks: u32, block_size: u32) -> Result<u64, Error> {
+    lba.checked_add(u64::from(blocks))
+        .and_then(|end| end.checked_mul(u64::from(block_size)))
+        .ok_or_else(|| Error::Config("byte offset overflow".into()))?;
+    lba.checked_mul(u64::from(block_size))
+        .ok_or_else(|| Error::Config("byte offset overflow".into()))
+}
+
+fn cache_aligned(offset: u64, len: usize, block_size: u32) -> bool {
+    offset.is_multiple_of(SEGMENT_BYTES as u64)
+        && len.is_multiple_of(SEGMENT_BYTES)
+        && SEGMENT_BYTES.is_multiple_of(block_size as usize)
+}
+
+fn write_blocks(len: usize, block_size: u32) -> Result<u32, Error> {
+    if len == 0 || !len.is_multiple_of(block_size as usize) || len > u32::MAX as usize {
+        return Err(Error::Config(
+            "write must contain whole logical blocks".into(),
+        ));
+    }
+    Ok((len / block_size as usize) as u32)
 }
 
 fn transfer_len(blocks: u32, size: u32) -> Result<usize, Error> {

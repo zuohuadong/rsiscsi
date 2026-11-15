@@ -1,4 +1,7 @@
 //! Deterministic local targets: no LAN, credentials or remote writes.
+#[path = "mock_target/cache_tests.rs"]
+mod cache_tests;
+
 use iscsi_core::{
     BenchOptions, BenchPattern, Error, SessionOptions, Target, TargetAddr, benchmark, login,
     wire::{self, Bhs, Pdu},
@@ -498,6 +501,7 @@ async fn benchmarks_account_for_all_bytes_and_drain_all_four_patterns() {
         .await
         .unwrap();
         assert_eq!(report.results.len(), 2);
+        assert_eq!(report.cache, iscsi_core::CacheStats::default());
         for result in report.results {
             assert!(result.commands > 0);
             assert_eq!(result.bytes, result.commands * 512);

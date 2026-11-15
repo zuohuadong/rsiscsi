@@ -6,6 +6,7 @@
 //! No block devices are created. Writes modify the remote LUN.
 
 mod bench;
+pub mod cache;
 mod config;
 mod error;
 mod login;
@@ -16,6 +17,7 @@ mod stats;
 pub mod wire;
 
 pub use bench::*;
+pub use cache::{Cache, CacheConfig, CacheStats};
 pub use config::*;
 pub use error::Error;
 pub use pool::{BufferPool, PooledBuffer};

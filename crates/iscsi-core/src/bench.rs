@@ -1,4 +1,4 @@
-use crate::{Error, Session};
+use crate::{CacheStats, Error, Session};
 use hdrhistogram::Histogram;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,7 @@ pub struct BenchReport {
     /// Write results exclude the subsequent SYNCHRONIZE CACHE duration.
     pub flush_seconds: f64,
     pub results: Vec<BenchResult>,
+    pub cache: CacheStats,
 }
 
 /// Cooperative stop: no new requests after the next worker loop boundary.
@@ -164,6 +165,7 @@ pub async fn benchmark_cancellable(
         warmup_seconds: opts.warmup.as_secs_f64(),
         flush_seconds: 0.0,
         results: Vec::new(),
+        cache: CacheStats::default(),
     };
     for &qd in &opts.queue_depths {
         if cancellation.is_cancelled() {
@@ -210,6 +212,7 @@ pub async fn benchmark_cancellable(
             report.flush_seconds += start.elapsed().as_secs_f64();
         }
     }
+    report.cache = session.cache_stats();
     Ok(Some(report))
 }
 
@@ -255,6 +258,7 @@ async fn phase(
         let pattern = opts.pattern;
         let cancellation = cancellation.clone();
         let start_lba = opts.start_lba;
+        let cache = session.cache_config().enabled();
         workers.spawn(async move {
             let mut rng = StdRng::from_entropy();
             barrier.wait().await;
@@ -273,7 +277,16 @@ async fn phase(
                 let lba = start_lba + slot * u64::from(blocks);
                 let before = Instant::now();
                 let result = if pattern.is_write() {
-                    session.write_buffer(lba, buffer).await
+                    if cache {
+                        session.write_cached(lba, &buffer).await.map(|()| buffer)
+                    } else {
+                        session.write_buffer(lba, buffer).await
+                    }
+                } else if cache {
+                    session.read_cached(lba, blocks).await.map(|bytes| {
+                        buffer.copy_from_slice(&bytes);
+                        buffer
+                    })
                 } else {
                     session.read_buffer(lba, blocks, buffer).await
                 };

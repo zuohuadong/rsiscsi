@@ -219,7 +219,9 @@ pub fn decode_binary(value: &str) -> Result<Vec<u8>, Error> {
             return Err(Error::Login("odd CHAP hex length".into()));
         }
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|s| {
                 let s =
                     std::str::from_utf8(s).map_err(|_| Error::Login("invalid CHAP hex".into()))?;

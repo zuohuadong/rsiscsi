@@ -67,7 +67,7 @@ pub(crate) fn parse_luns(data: &[u8]) -> Result<Vec<u64>, Error> {
         return Err(Error::Protocol("truncated REPORT LUNS".into()));
     }
     let mut luns = Vec::new();
-    for entry in data[8..8 + size].chunks_exact(8) {
+    for entry in data[8..8 + size].as_chunks::<8>().0 {
         let lun = match entry[0] >> 6 {
             0 if entry[0] == 0 && entry[2..].iter().all(|b| *b == 0) => u64::from(entry[1]),
             1 if entry[2..].iter().all(|b| *b == 0) => {
