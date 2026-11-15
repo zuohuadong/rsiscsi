@@ -13,6 +13,8 @@ pub(crate) struct Stats {
     pub bytes_written: AtomicU64,
     pub commands: AtomicU64,
     pub errors: AtomicU64,
+    /// Unit-attention retries, which are not failures.
+    pub retries: AtomicU64,
 }
 
 /// Monotonic payload counters plus lifetime rates.
@@ -22,6 +24,7 @@ pub struct StatsSnapshot {
     pub bytes_written: u64,
     pub commands: u64,
     pub errors: u64,
+    pub retries: u64,
     pub elapsed_seconds: f64,
     pub iops: f64,
     /// Payload bytes/sec, both directions.
@@ -39,6 +42,7 @@ impl Stats {
             bytes_written,
             commands,
             errors: self.errors.load(Ordering::Relaxed),
+            retries: self.retries.load(Ordering::Relaxed),
             elapsed_seconds: seconds,
             iops: commands as f64 / seconds,
             throughput: (bytes_read + bytes_written) as f64 / seconds,

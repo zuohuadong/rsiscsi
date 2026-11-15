@@ -303,7 +303,13 @@ impl Session {
                 )
                 .await;
             match result {
-                Err(ref e) if attempt < 2 && scsi::unit_attention(e) => continue,
+                Err(ref e) if attempt < 2 && scsi::unit_attention(e) => {
+                    // The socket owner already counted the rejected attempt;
+                    // report it as a retry so a healthy session shows no errors.
+                    self.inner.stats.errors.fetch_sub(1, Ordering::Relaxed);
+                    self.inner.stats.retries.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 other => return other,
             }
         }

@@ -23,6 +23,7 @@ pub enum Event {
         iops: f64,
         mib: f64,
         errors: u64,
+        retries: u64,
     },
     ConnectionClosed(u64),
     BenchFinished(Result<Option<BenchReport>, String>),
@@ -126,6 +127,7 @@ impl Engine {
                                 iops: sampler.iops,
                                 mib: sampler.mib_per_second,
                                 errors: snapshot.errors,
+                                retries: snapshot.retries,
                             })
                             .is_err()
                         {

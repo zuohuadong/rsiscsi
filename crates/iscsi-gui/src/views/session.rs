@@ -54,7 +54,10 @@ impl Desktop {
                         "IOPS",
                         format!("{:.1}", self.iops),
                     ))
-                    .child(super::benchmark::metric("错误", self.errors.to_string())),
+                    .child(super::benchmark::metric("错误", self.errors.to_string()))
+                    .when(self.retries > 0, |row| {
+                        row.child(super::benchmark::metric("重试", self.retries.to_string()))
+                    }),
             );
         if let Some(connection) = &self.connection {
             let inquiry = &connection.inquiry;
@@ -68,15 +71,7 @@ impl Desktop {
                     inquiry.serial.clone().unwrap_or_else(|| "未提供".into()),
                     cx,
                 ))
-                .child(pair(
-                    "VPD 0x83",
-                    inquiry
-                        .vpd83
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>(),
-                    cx,
-                ))
+                .child(pair("VPD 0x83", shorten_vpd(&inquiry.vpd83), cx))
                 .child(pair(
                     "容量",
                     format!(
@@ -91,11 +86,9 @@ impl Desktop {
             if let Ok(serde_json::Value::Object(parameters)) =
                 serde_json::to_value(connection.session.negotiated())
             {
-                panel = panel.children(
-                    parameters
-                        .into_iter()
-                        .map(|(key, parameter)| pair(key, parameter.to_string(), cx)),
-                );
+                panel = panel.children(parameters.into_iter().map(|(key, parameter)| {
+                    pair(parameter_label(&key), parameter.to_string(), cx)
+                }));
             }
         }
         panel.child(heading("活动日志")).child(
@@ -116,6 +109,7 @@ impl Desktop {
                 self.report = None;
                 self.history.clear();
                 self.errors = 0;
+                self.retries = 0;
                 self.bench_form.allow_write = false;
                 self.log("正在连接目标");
                 self.engine.connect(target);
@@ -124,4 +118,37 @@ impl Desktop {
         }
         cx.notify();
     }
+}
+
+/// The full identifier does not fit the compact table; keep a recognisable prefix.
+fn shorten_vpd(bytes: &[u8]) -> String {
+    let mut text = bytes
+        .iter()
+        .take(12)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if bytes.len() > 12 {
+        text.push('…');
+    }
+    text
+}
+
+fn parameter_label(key: &str) -> SharedString {
+    match key {
+        "header_digest" => "头部摘要",
+        "data_digest" => "数据摘要",
+        "max_recv_data_segment_length" => "接收段上限",
+        "target_max_recv_data_segment_length" => "目标接收段上限",
+        "max_burst_length" => "最大突发长度",
+        "first_burst_length" => "首突发长度",
+        "initial_r2t" => "初始 R2T",
+        "immediate_data" => "即时数据",
+        "default_time2wait" => "Time2Wait",
+        "default_time2retain" => "Time2Retain",
+        "error_recovery_level" => "错误恢复级别",
+        "max_connections" => "最大连接数",
+        "max_outstanding_r2t" => "未完成 R2T 上限",
+        other => return SharedString::from(other.to_owned()),
+    }
+    .into()
 }

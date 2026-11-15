@@ -29,10 +29,12 @@ impl Desktop {
                 iops,
                 mib,
                 errors,
+                retries,
             } if self.connection_generation == Some(generation) => {
                 self.iops = iops;
                 self.mib = mib;
                 self.errors = errors;
+                self.retries = retries;
                 if self.bench.running() {
                     if self.history.len() == 60 {
                         self.history.pop_front();
