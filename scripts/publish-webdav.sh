@@ -38,8 +38,21 @@ case "$TARGET" in
 	*) base_path="${ROOT#/}/$TARGET" ;;
 esac
 target_path="${base_path%/}/$VERSION"
+target_path=${target_path#/}
 
-# Create parent folders one level at a time; 405 means it already exists.
+# True when the collection already exists. CTFile answers MKCOL on an existing
+# folder with 405 or, on some edge nodes, 403, so probe with PROPFIND instead of
+# trusting the status code.
+remote_exists() {
+	code=$("$CURL" --silent --show-error --request PROPFIND \
+		--header 'Depth: 0' \
+		--user "$USER:$PASS" \
+		--output /dev/null --write-out '%{http_code}' \
+		"$1" || true)
+	[ "$code" = 207 ] || [ "$code" = 200 ]
+}
+
+# Create parent folders one level at a time.
 rest=$target_path
 prefix=""
 while [ -n "$rest" ]; do
@@ -47,14 +60,26 @@ while [ -n "$rest" ]; do
 		*/*) part=${rest%%/*}; rest=${rest#*/} ;;
 		*) part=$rest; rest="" ;;
 	esac
+	[ -n "$part" ] || continue
 	prefix="$prefix/$part"
+	prefix_url="$BASE/$(encode "$prefix")"
+	if remote_exists "$prefix_url"; then
+		continue
+	fi
 	code=$("$CURL" --silent --show-error --request MKCOL \
 		--user "$USER:$PASS" \
 		--output /dev/null --write-out '%{http_code}' \
-		"$BASE$(encode "$prefix")" || true)
+		"$prefix_url" || true)
 	case "$code" in
 		201|405|301|302) ;;
-		*) echo "MKCOL $prefix failed with HTTP $code" >&2; exit 1 ;;
+		*)
+			# A concurrent run may have created it between the probe and MKCOL.
+			if remote_exists "$prefix_url"; then
+				continue
+			fi
+			echo "MKCOL $prefix failed with HTTP $code" >&2
+			exit 1
+			;;
 	esac
 done
 
