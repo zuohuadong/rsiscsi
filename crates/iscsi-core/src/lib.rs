@@ -19,6 +19,6 @@ pub use bench::*;
 pub use config::*;
 pub use error::Error;
 pub use pool::{BufferPool, PooledBuffer};
-pub use scsi::{Capacity, InquiryData};
+pub use scsi::{CacheMode, Capacity, InquiryData};
 pub use session::{Session, discover, discover_with_chap, login};
 pub use stats::{SessionStats, StatsSnapshot};

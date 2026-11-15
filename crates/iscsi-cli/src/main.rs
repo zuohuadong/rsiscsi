@@ -290,13 +290,16 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                 session.test_unit_ready().await.map_err(io_failure)?;
                 let inquiry = session.inquiry().await.map_err(io_failure)?;
                 let capacity = session.capacity().await.map_err(io_failure)?;
+                let cache = session.cache_mode().await.map_err(io_failure)?;
                 if cli.json {
-                    println!("{}", json!({"inquiry": inquiry, "capacity": capacity, "negotiated": session.negotiated()}));
+                    println!("{}", json!({"inquiry": inquiry, "capacity": capacity, "cache": cache, "negotiated": session.negotiated()}));
                 } else {
                     println!("厂商：{}\n产品：{}\n版本：{}\n序列号：{}\n容量：{} 块 × {} 字节（{:.2} GiB）",
                         inquiry.vendor, inquiry.product, inquiry.revision,
                         inquiry.serial.as_deref().unwrap_or("未提供"), capacity.blocks, capacity.block_size,
                         capacity.bytes() as f64 / 1_073_741_824.0);
+                    println!("写缓存：{}  WCE={}", if cache.write_cache { "目标有易失缓存" } else { "目标无易失缓存" }, u8::from(cache.write_cache));
+                    println!("读缓存：{}  RCD={}", if cache.read_cache_disabled { "目标要求不缓存读" } else { "允许缓存读" }, u8::from(cache.read_cache_disabled));
                     println!("协商参数：{}", serde_json::to_string_pretty(session.negotiated()).map_err(io_failure)?);
                 }
             }

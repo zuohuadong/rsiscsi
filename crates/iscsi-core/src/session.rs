@@ -1,6 +1,7 @@
 use crate::{
-    BufferPool, Capacity, ChapCredentials, DiscoveredTarget, Error, InquiryData, NegotiatedParams,
-    PooledBuffer, SessionOptions, SessionStats, StatsSnapshot, Target, TargetAddr,
+    BufferPool, CacheMode, Capacity, ChapCredentials, DiscoveredTarget, Error, InquiryData,
+    NegotiatedParams, PooledBuffer, SessionOptions, SessionStats, StatsSnapshot, Target,
+    TargetAddr,
     login::{self, Connection},
     scsi,
     stats::Stats,
@@ -353,6 +354,17 @@ impl Session {
             }
         }
         Ok(info)
+    }
+
+    /// Reads the caching mode page so callers can decide whether a write-back
+    /// policy would mean anything. Read-only: MODE SENSE never changes state.
+    pub async fn cache_mode(&self) -> Result<CacheMode, Error> {
+        let mut cdb = [0; 16];
+        cdb[0] = 0x5a; // MODE SENSE(10), current values
+        cdb[2] = 0x08; // caching mode page
+        cdb[7..9].copy_from_slice(&64u16.to_be_bytes());
+        let data = self.command(cdb, 64, self.inner.lun).await?;
+        scsi::cache_mode(&data)
     }
 
     pub async fn capacity(&self) -> Result<Capacity, Error> {

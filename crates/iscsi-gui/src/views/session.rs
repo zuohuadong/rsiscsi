@@ -82,6 +82,24 @@ impl Desktop {
                     ),
                     cx,
                 ))
+                .child(pair(
+                    "写缓存",
+                    if connection.cache.write_cache {
+                        "目标启用易失缓存（WCE=1），掉电可能丢写"
+                    } else {
+                        "目标未启用易失缓存（WCE=0）"
+                    },
+                    cx,
+                ))
+                .child(pair(
+                    "读缓存",
+                    if connection.cache.read_cache_disabled {
+                        "目标要求不缓存读（RCD=1）"
+                    } else {
+                        "允许客户端缓存读（RCD=0）"
+                    },
+                    cx,
+                ))
                 .child(heading("协商参数"));
             if let Ok(serde_json::Value::Object(parameters)) =
                 serde_json::to_value(connection.session.negotiated())

@@ -25,6 +25,15 @@ impl Capacity {
     }
 }
 
+/// Caching mode page (0x08) flags that drive write-cache policy.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CacheMode {
+    /// WCE: the target holds writes in a volatile cache.
+    pub write_cache: bool,
+    /// RCD: the target asks the initiator not to cache reads.
+    pub read_cache_disabled: bool,
+}
+
 pub(crate) fn be32(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     let value = bytes
         .get(offset..offset + 4)
@@ -94,6 +103,30 @@ pub(crate) fn vpd(data: &[u8], page: u8) -> Result<&[u8], Error> {
         .ok_or_else(|| Error::Protocol("truncated VPD page".into()))
 }
 
+/// Parse the caching mode page returned by MODE SENSE(10).
+///
+/// The response starts with an 8-byte mode parameter header whose last two
+/// bytes give the block descriptor length; the page follows it.
+pub(crate) fn cache_mode(data: &[u8]) -> Result<CacheMode, Error> {
+    if data.len() < 8 {
+        return Err(Error::Protocol("short MODE SENSE response".into()));
+    }
+    let descriptor = usize::from(u16::from_be_bytes([data[6], data[7]]));
+    let page = data
+        .get(8 + descriptor..)
+        .ok_or_else(|| Error::Protocol("truncated MODE SENSE response".into()))?;
+    if page.first().is_none_or(|code| code & 0x3f != 0x08) {
+        return Err(Error::Protocol("unexpected mode page".into()));
+    }
+    let flags = *page
+        .get(2)
+        .ok_or_else(|| Error::Protocol("truncated caching mode page".into()))?;
+    Ok(CacheMode {
+        write_cache: flags & 0x04 != 0,
+        read_cache_disabled: flags & 0x01 != 0,
+    })
+}
+
 pub(crate) fn rw_cdb(op: u8, lba: u64, blocks: u32) -> [u8; 16] {
     let mut cdb = [0; 16];
     cdb[0] = op;
@@ -127,5 +160,22 @@ mod tests {
         let mut list = vec![0, 0, 0, 8, 0, 0, 0, 0];
         list.extend_from_slice(&lun_bytes(1).unwrap());
         assert_eq!(parse_luns(&list).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn caches_mode_page_flags() {
+        // 8-byte header with no block descriptor, then page 0x08.
+        let mut data = vec![0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x12, 0x05, 0, 0];
+        let mode = cache_mode(&data).unwrap();
+        assert!(mode.write_cache && mode.read_cache_disabled);
+        data[10] = 0x00;
+        let mode = cache_mode(&data).unwrap();
+        assert!(!mode.write_cache && !mode.read_cache_disabled);
+        // A block descriptor shifts the page.
+        let mut shifted = vec![0, 0, 0, 0, 0, 0, 0, 8];
+        shifted.extend_from_slice(&[0; 8]);
+        shifted.extend_from_slice(&[0x08, 0x12, 0x04]);
+        assert!(cache_mode(&shifted).unwrap().write_cache);
+        assert!(cache_mode(&[0; 4]).is_err());
     }
 }

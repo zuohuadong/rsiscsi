@@ -1,7 +1,7 @@
 use crate::state::{Config, SavedTarget, config_path, load_config, save_config};
 use iscsi_core::{
-    BenchOptions, BenchReport, BenchmarkCancellation, Capacity, DiscoveredTarget, InquiryData,
-    Session, benchmark_cancellable, discover_with_chap, login,
+    BenchOptions, BenchReport, BenchmarkCancellation, CacheMode, Capacity, DiscoveredTarget,
+    InquiryData, Session, benchmark_cancellable, discover_with_chap, login,
 };
 use std::{future::Future, time::Duration};
 use tokio::{runtime::Handle, sync::mpsc, task::AbortHandle};
@@ -10,6 +10,7 @@ pub struct Connection {
     pub session: Session,
     pub inquiry: InquiryData,
     pub capacity: Capacity,
+    pub cache: CacheMode,
 }
 
 pub enum Event {
@@ -191,10 +192,16 @@ async fn connect(target: SavedTarget) -> Result<Connection, iscsi_core::Error> {
     session.test_unit_ready().await?;
     let inquiry = session.inquiry().await?;
     let capacity = session.capacity().await?;
+    // A missing caching page (some targets hide it) must not abort connecting.
+    let cache = session.cache_mode().await.unwrap_or(CacheMode {
+        write_cache: false,
+        read_cache_disabled: false,
+    });
     Ok(Connection {
         session,
         inquiry,
         capacity,
+        cache,
     })
 }
 
