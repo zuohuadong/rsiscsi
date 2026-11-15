@@ -17,7 +17,9 @@ mod stats;
 pub mod wire;
 
 pub use bench::*;
-pub use cache::{Cache, CacheConfig, CacheStats};
+pub use cache::{
+    Cache, CacheConfig, CacheStats, auto_read_cache_bytes, recommended_write_back_bytes,
+};
 pub use config::*;
 pub use error::Error;
 pub use pool::{BufferPool, PooledBuffer};

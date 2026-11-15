@@ -50,15 +50,32 @@ impl Desktop {
                     }),
             );
         if let Some(connection) = &self.connection {
-            if connection.session.cache_config().enabled() {
+            let cache = connection.session.cache_config();
+            if cache.enabled() {
                 let stats = connection.session.cache_stats();
                 panel = panel
                     .child(pair(
-                        "本地读缓存命中率",
-                        format!("{:.2}%", stats.hit_rate() * 100.),
+                        "本地读缓存",
+                        format!(
+                            "{} MiB · 命中 {:.2}%",
+                            cache.read_capacity_bytes / 1_048_576,
+                            stats.hit_rate() * 100.
+                        ),
                         cx,
                     ))
-                    .child(pair("脏数据字节数", stats.dirty_bytes.to_string(), cx));
+                    .child(pair(
+                        "本地写回缓存",
+                        if cache.write_back_capacity_bytes > 0 {
+                            format!(
+                                "{} MiB · 脏数据 {} B",
+                                cache.write_back_capacity_bytes / 1_048_576,
+                                stats.dirty_bytes
+                            )
+                        } else {
+                            "关闭（直写）".into()
+                        },
+                        cx,
+                    ));
             }
             let inquiry = &connection.inquiry;
             panel = panel

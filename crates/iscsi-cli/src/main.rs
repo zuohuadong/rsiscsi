@@ -1,7 +1,8 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use iscsi_core::{
     BenchOptions, BenchPattern, CacheConfig, ChapCredentials, Error, SessionOptions, Target,
-    TargetAddr, benchmark, discover_with_chap, login,
+    TargetAddr, auto_read_cache_bytes, benchmark, discover_with_chap, login,
+    recommended_write_back_bytes,
 };
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
@@ -27,11 +28,12 @@ struct Cli {
     /// 启用数据 CRC32C
     #[arg(long, global = true)]
     data_digest: bool,
-    /// 本地读缓存容量（默认关闭）
-    #[arg(long, global = true, default_value = "0", value_parser = parse_cache_size)]
-    cache_size: usize,
-    /// 危险：内存写回容量，崩溃或断电会丢失未刷写数据
-    #[arg(long, global = true, default_value = "0", value_parser = parse_cache_size)]
+    /// 本地读缓存容量：大小或 auto/off；read 默认 auto（内存 1/8，128 MiB–2 GiB），
+    /// bench 默认关闭以免命中掩盖 LUN 真实吞吐
+    #[arg(long, global = true, value_parser = parse_read_cache_size)]
+    cache_size: Option<usize>,
+    /// 危险：内存写回容量，auto 取推荐值；崩溃或断电会丢失未刷写数据
+    #[arg(long, global = true, default_value = "0", value_parser = parse_write_back_size)]
     write_back: usize,
     /// 写回刷写间隔（毫秒），仅写回开启时有效
     #[arg(long, global = true)]
@@ -191,8 +193,20 @@ fn parse_byte_size(input: &str) -> Result<usize, String> {
         .ok_or_else(|| "块大小超出范围".into())
 }
 
-fn parse_cache_size(input: &str) -> Result<usize, String> {
-    parse_byte_size(input)
+fn parse_read_cache_size(input: &str) -> Result<usize, String> {
+    match input.to_ascii_lowercase().as_str() {
+        "auto" => Ok(auto_read_cache_bytes()),
+        "off" | "none" => Ok(0),
+        _ => parse_byte_size(input),
+    }
+}
+
+fn parse_write_back_size(input: &str) -> Result<usize, String> {
+    match input.to_ascii_lowercase().as_str() {
+        "auto" => Ok(recommended_write_back_bytes()),
+        "off" | "none" => Ok(0),
+        _ => parse_byte_size(input),
+    }
 }
 
 fn cache_config(cli: &Cli) -> Result<CacheConfig, Error> {
@@ -209,8 +223,23 @@ fn cache_config(cli: &Cli) -> Result<CacheConfig, Error> {
     if cli.flush_interval == Some(0) {
         return Err(Error::Config("--flush-interval 必须大于 0".into()));
     }
+    let read_capacity_bytes = cli.cache_size.unwrap_or(match cli.command {
+        Command::Read { .. } => auto_read_cache_bytes(),
+        _ => 0,
+    });
+    for (name, bytes) in [
+        ("--cache-size", read_capacity_bytes),
+        ("--write-back", cli.write_back),
+    ] {
+        if bytes > 0 && bytes < iscsi_core::cache::SEGMENT_BYTES {
+            return Err(Error::Config(format!(
+                "{name} 至少为 {} KiB",
+                iscsi_core::cache::SEGMENT_BYTES / 1024
+            )));
+        }
+    }
     Ok(CacheConfig {
-        read_capacity_bytes: cli.cache_size,
+        read_capacity_bytes,
         write_back_capacity_bytes: cli.write_back,
         flush_interval: cli.flush_interval.map(Duration::from_millis),
     })
@@ -362,7 +391,7 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                 }
                 let mut bytes = 0;
                 for _ in 0..*repeat {
-                    if cli.cache_size > 0 {
+                    if session.cache_config().read_capacity_bytes > 0 {
                         let data = session.read_cached(*lba, *blocks).await.map_err(command_failure)?;
                         bytes = data.len();
                         tokio::fs::write(out, &data).await.map_err(io_failure)?;
@@ -374,17 +403,18 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                 }
                 if cli.json {
                     let mut output = json!({"bytes": bytes, "lba": lba, "blocks": blocks, "out": out});
-                    if cli.cache_size > 0 {
+                    if session.cache_config().read_capacity_bytes > 0 {
                         output["cache"] = json!(session.cache_stats());
                         output["cache_hit_rate"] = json!(session.cache_stats().hit_rate());
                     }
                     println!("{output}");
                 } else {
                     println!("已读取 {} 字节至 {}", bytes, out.display());
-                    if cli.cache_size > 0 {
+                    let capacity = session.cache_config().read_capacity_bytes;
+                    if capacity > 0 {
                         let stats = session.cache_stats();
-                        println!("本地读缓存命中率：{:.2}%（命中 {} B / LUN 读取 {} B）",
-                            stats.hit_rate() * 100., stats.hits, stats.misses);
+                        println!("本地读缓存 {} MiB，命中率 {:.2}%（命中 {} B / LUN 读取 {} B）",
+                            capacity / 1_048_576, stats.hit_rate() * 100., stats.hits, stats.misses);
                     }
                 }
             }
@@ -476,11 +506,67 @@ mod tests {
         assert_eq!(parse_size("4KiB").unwrap(), 4096);
         assert!(parse_size("0").is_err());
         assert!(parse_size("999999999999GiB").is_err());
-        assert_eq!(parse_cache_size("0").unwrap(), 0);
-        assert_eq!(parse_cache_size("0MiB").unwrap(), 0);
-        assert_eq!(parse_cache_size("64KiB").unwrap(), 65536);
-        assert_eq!(parse_cache_size("8GiB").unwrap(), 8 * 1_073_741_824);
+        assert_eq!(parse_read_cache_size("0").unwrap(), 0);
+        assert_eq!(parse_read_cache_size("off").unwrap(), 0);
+        assert_eq!(parse_write_back_size("OFF").unwrap(), 0);
+        assert_eq!(parse_read_cache_size("64KiB").unwrap(), 65536);
+        assert_eq!(parse_read_cache_size("8GiB").unwrap(), 8 * 1_073_741_824);
+        assert_eq!(
+            parse_read_cache_size("auto").unwrap(),
+            auto_read_cache_bytes()
+        );
+        assert_eq!(
+            parse_write_back_size("auto").unwrap(),
+            recommended_write_back_bytes()
+        );
         assert!(parse_size("8GiB").is_err());
+    }
+
+    #[test]
+    fn read_defaults_to_auto_cache_and_bench_stays_direct() {
+        let read = Cli::try_parse_from([
+            "iscsi-rs", "read", "--host", "h", "--iqn", "i", "--blocks", "1", "--out", "/tmp/x",
+        ])
+        .unwrap();
+        assert_eq!(
+            cache_config(&read).unwrap().read_capacity_bytes,
+            auto_read_cache_bytes()
+        );
+        let off = Cli::try_parse_from([
+            "iscsi-rs",
+            "read",
+            "--host",
+            "h",
+            "--iqn",
+            "i",
+            "--blocks",
+            "1",
+            "--out",
+            "/tmp/x",
+            "--cache-size",
+            "off",
+        ])
+        .unwrap();
+        assert_eq!(cache_config(&off).unwrap().read_capacity_bytes, 0);
+        let bench =
+            Cli::try_parse_from(["iscsi-rs", "bench", "--host", "h", "--iqn", "i"]).unwrap();
+        assert_eq!(cache_config(&bench).unwrap().read_capacity_bytes, 0);
+        let tiny = Cli::try_parse_from([
+            "iscsi-rs",
+            "read",
+            "--host",
+            "h",
+            "--iqn",
+            "i",
+            "--blocks",
+            "1",
+            "--out",
+            "/tmp/x",
+            "--cache-size",
+            "4KiB",
+        ])
+        .unwrap();
+        assert!(cache_config(&tiny).is_err());
     }
 
     #[tokio::test]

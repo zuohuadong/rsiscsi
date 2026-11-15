@@ -3,12 +3,73 @@ use crate::Error;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
 
 pub const SEGMENT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BATCH_BYTES: usize = 1024 * 1024;
+
+const MIB: usize = 1024 * 1024;
+const AUTO_READ_MIN_BYTES: usize = 128 * MIB;
+const AUTO_READ_MAX_BYTES: usize = 2 * 1024 * MIB;
+const AUTO_READ_FALLBACK_BYTES: usize = 512 * MIB;
+const WRITE_BACK_MIN_BYTES: usize = 64 * MIB;
+const WRITE_BACK_MAX_BYTES: usize = 256 * MIB;
+
+/// 自动读缓存容量：本机可用内存的 1/8，限制在 128 MiB–2 GiB，按 64 MiB 向下取整。
+///
+/// macOS 没有无依赖的可用内存查询，用物理内存近似；都取不到时退回 512 MiB。
+/// 结果按进程缓存，避免界面每帧重复探测。
+pub fn auto_read_cache_bytes() -> usize {
+    static BUDGET: OnceLock<usize> = OnceLock::new();
+    *BUDGET.get_or_init(|| auto_read_cache_from(usable_memory_bytes()))
+}
+
+/// 写回缓存推荐容量：自动读缓存的 1/4，限制在 64 MiB–256 MiB。
+pub fn recommended_write_back_bytes() -> usize {
+    (auto_read_cache_bytes() / 4).clamp(WRITE_BACK_MIN_BYTES, WRITE_BACK_MAX_BYTES)
+}
+
+fn auto_read_cache_from(memory: Option<u64>) -> usize {
+    let budget = memory.map_or(AUTO_READ_FALLBACK_BYTES as u64, |bytes| bytes / 8);
+    let clamped = budget.clamp(AUTO_READ_MIN_BYTES as u64, AUTO_READ_MAX_BYTES as u64) as usize;
+    clamped / (64 * MIB) * (64 * MIB)
+}
+
+fn usable_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        std::str::from_utf8(&output.stdout)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let field = |key: &str| {
+            meminfo.lines().find_map(|line| {
+                line.strip_prefix(key)?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+                    .map(|kib| kib * 1024)
+            })
+        };
+        field("MemAvailable:").or_else(|| field("MemTotal:"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheConfig {
@@ -199,6 +260,21 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_budget_is_clamped_and_rounded() {
+        assert_eq!(auto_read_cache_from(None), AUTO_READ_FALLBACK_BYTES);
+        assert_eq!(auto_read_cache_from(Some(512 * MIB as u64)), 128 * MIB);
+        assert_eq!(
+            auto_read_cache_from(Some(8 * 1024 * MIB as u64)),
+            1024 * MIB
+        );
+        assert_eq!(
+            auto_read_cache_from(Some(64 * 1024 * MIB as u64)),
+            2 * 1024 * MIB
+        );
+        assert!(recommended_write_back_bytes().is_multiple_of(64 * MIB));
+    }
 
     #[test]
     fn lru_enforces_byte_budget_and_touches_hits() {

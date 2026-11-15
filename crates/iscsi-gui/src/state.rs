@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use iscsi_core::{
     BenchOptions, BenchPattern, CacheConfig, Capacity, ChapCredentials, SessionOptions, Target,
-    TargetAddr,
+    TargetAddr, auto_read_cache_bytes, recommended_write_back_bytes,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -173,32 +173,118 @@ pub struct BenchSettings {
     pub allow_write: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy)]
+pub struct CachePreset {
+    pub label: &'static str,
+    /// `None` 表示自动：读缓存按本机内存计算，写回取推荐值。
+    pub mib: Option<usize>,
+}
+
+pub const READ_CACHE_PRESETS: [CachePreset; 6] = [
+    CachePreset {
+        label: "自动（推荐）",
+        mib: None,
+    },
+    CachePreset {
+        label: "64 MiB",
+        mib: Some(64),
+    },
+    CachePreset {
+        label: "128 MiB",
+        mib: Some(128),
+    },
+    CachePreset {
+        label: "256 MiB",
+        mib: Some(256),
+    },
+    CachePreset {
+        label: "512 MiB",
+        mib: Some(512),
+    },
+    CachePreset {
+        label: "1 GiB",
+        mib: Some(1024),
+    },
+];
+
+pub const WRITE_BACK_PRESETS: [CachePreset; 4] = [
+    CachePreset {
+        label: "推荐（自动）",
+        mib: None,
+    },
+    CachePreset {
+        label: "64 MiB",
+        mib: Some(64),
+    },
+    CachePreset {
+        label: "256 MiB",
+        mib: Some(256),
+    },
+    CachePreset {
+        label: "512 MiB",
+        mib: Some(512),
+    },
+];
+
 pub struct CacheSettings {
     pub read_enabled: bool,
-    pub read_mib: usize,
+    pub read_preset: usize,
     pub write_back_enabled: bool,
-    pub write_back_mib: usize,
+    pub write_preset: usize,
+}
+
+impl Default for CacheSettings {
+    /// 读缓存默认开启自动容量；写回保持关闭，行为与未引入缓存时一致。
+    fn default() -> Self {
+        Self {
+            read_enabled: true,
+            read_preset: 0,
+            write_back_enabled: false,
+            write_preset: 0,
+        }
+    }
 }
 
 impl CacheSettings {
+    pub fn read_capacity(&self) -> Result<usize> {
+        Self::preset_bytes(
+            &READ_CACHE_PRESETS,
+            self.read_preset,
+            auto_read_cache_bytes(),
+        )
+    }
+
+    pub fn write_back_capacity(&self) -> Result<usize> {
+        Self::preset_bytes(
+            &WRITE_BACK_PRESETS,
+            self.write_preset,
+            recommended_write_back_bytes(),
+        )
+    }
+
+    fn preset_bytes(presets: &[CachePreset], index: usize, automatic: usize) -> Result<usize> {
+        let preset = presets.get(index).context("无效的缓存容量选项")?;
+        match preset.mib {
+            None => Ok(automatic),
+            Some(mib) => mib.checked_mul(1_048_576).context("缓存容量溢出"),
+        }
+    }
+
     pub fn config(&self, allow_write: bool) -> Result<CacheConfig> {
         if self.write_back_enabled && !allow_write {
             bail!("写回缓存必须同时确认允许写入");
         }
-        let budget = |enabled: bool, mib: usize| -> Result<usize> {
-            if !enabled {
-                return Ok(0);
-            }
-            let bytes = mib.checked_mul(1_048_576).context("缓存容量溢出")?;
-            if bytes == 0 {
-                bail!("开启缓存时容量必须大于 0 MiB");
-            }
-            Ok(bytes)
-        };
         Ok(CacheConfig {
-            read_capacity_bytes: budget(self.read_enabled, self.read_mib)?,
-            write_back_capacity_bytes: budget(self.write_back_enabled, self.write_back_mib)?,
+            read_capacity_bytes: if self.read_enabled {
+                self.read_capacity()?
+            } else {
+                0
+            },
+            write_back_capacity_bytes: if self.write_back_enabled {
+                self.write_back_capacity()?
+            } else {
+                0
+            },
             flush_interval: None,
         })
     }
@@ -301,21 +387,28 @@ mod tests {
     }
 
     #[test]
-    fn caches_default_off_and_writeback_requires_separate_confirmation() -> Result<()> {
+    fn caches_default_to_auto_read_and_closed_write_back() -> Result<()> {
         let mut settings = CacheSettings::default();
-        assert_eq!(settings.config(false)?, CacheConfig::default());
-        settings.read_enabled = true;
-        assert!(settings.config(false).is_err());
-        settings.read_mib = 8;
-        assert_eq!(settings.config(false)?.read_capacity_bytes, 8 * 1_048_576);
+        let defaults = settings.config(false)?;
+        assert_eq!(defaults.read_capacity_bytes, auto_read_cache_bytes());
+        assert_eq!(defaults.write_back_capacity_bytes, 0);
+        settings.read_preset = 2;
+        assert_eq!(settings.config(false)?.read_capacity_bytes, 128 * 1_048_576);
+        settings.read_enabled = false;
+        assert_eq!(settings.config(false)?.read_capacity_bytes, 0);
         settings.write_back_enabled = true;
-        settings.write_back_mib = 8;
         assert!(settings.config(false).is_err());
         assert_eq!(
             settings.config(true)?.write_back_capacity_bytes,
-            8 * 1_048_576
+            recommended_write_back_bytes()
         );
-        settings.write_back_mib = usize::MAX;
+        settings.write_preset = 3;
+        assert_eq!(
+            settings.config(true)?.write_back_capacity_bytes,
+            512 * 1_048_576
+        );
+        settings.read_preset = usize::MAX;
+        settings.read_enabled = true;
         assert!(settings.config(true).is_err());
         Ok(())
     }

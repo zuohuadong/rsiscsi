@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::{BenchSettings, CacheSettings};
+use crate::state::{BenchSettings, CacheSettings, READ_CACHE_PRESETS, WRITE_BACK_PRESETS};
 use anyhow::{Context as _, Result};
 use component::{
     IndexPath, Sizable,
@@ -23,8 +23,8 @@ pub struct BenchForm {
     pub allow_write: bool,
     pub read_cache: bool,
     pub write_back: bool,
-    read_capacity: Entity<InputState>,
-    write_capacity: Entity<InputState>,
+    read_preset: Entity<SelectState<Vec<&'static str>>>,
+    write_preset: Entity<SelectState<Vec<&'static str>>>,
 }
 
 impl BenchForm {
@@ -56,10 +56,30 @@ impl BenchForm {
             start: editor::input("0", window, cx),
             range: editor::input("16384", window, cx),
             allow_write: false,
-            read_cache: false,
+            read_cache: true,
             write_back: false,
-            read_capacity: editor::input("0", window, cx),
-            write_capacity: editor::input("0", window, cx),
+            read_preset: cx.new(|cx| {
+                SelectState::new(
+                    READ_CACHE_PRESETS
+                        .iter()
+                        .map(|preset| preset.label)
+                        .collect(),
+                    Some(IndexPath::default()),
+                    window,
+                    cx,
+                )
+            }),
+            write_preset: cx.new(|cx| {
+                SelectState::new(
+                    WRITE_BACK_PRESETS
+                        .iter()
+                        .map(|preset| preset.label)
+                        .collect(),
+                    Some(IndexPath::default()),
+                    window,
+                    cx,
+                )
+            }),
         }
     }
 
@@ -117,22 +137,19 @@ impl BenchForm {
     fn cache_config(&self, cx: &App) -> Result<iscsi_core::CacheConfig> {
         CacheSettings {
             read_enabled: self.read_cache,
-            read_mib: self
-                .read_capacity
-                .read(cx)
-                .value()
-                .parse()
-                .context("读缓存容量必须为非负整数")?,
+            read_preset: selected_row(&self.read_preset, cx),
             write_back_enabled: self.write_back,
-            write_back_mib: self
-                .write_capacity
-                .read(cx)
-                .value()
-                .parse()
-                .context("写回容量必须为非负整数")?,
+            write_preset: selected_row(&self.write_preset, cx),
         }
         .config(self.allow_write)
     }
+}
+
+fn selected_row(state: &Entity<SelectState<Vec<&'static str>>>, cx: &App) -> usize {
+    state
+        .read(cx)
+        .selected_index(cx)
+        .map_or(0, |index| index.row)
 }
 
 impl Desktop {
@@ -199,10 +216,10 @@ impl Desktop {
                                     })),
                             )
                             .child(field(
-                                "读缓存容量 (MiB)",
-                                NumberInput::new(&form.read_capacity)
+                                "读缓存容量",
+                                Select::new(&form.read_preset)
                                     .small()
-                                    .accessibility_label("读缓存容量 MiB")
+                                    .accessibility_label("读缓存容量")
                                     .disabled(running || !form.read_cache),
                                 cx,
                             )),
@@ -223,14 +240,24 @@ impl Desktop {
                                     })),
                             )
                             .child(field(
-                                "写回容量 (MiB)",
-                                NumberInput::new(&form.write_capacity)
+                                "写回容量",
+                                Select::new(&form.write_preset)
                                     .small()
-                                    .accessibility_label("写回容量 MiB")
+                                    .accessibility_label("写回容量")
                                     .disabled(running || !form.write_back),
                                 cx,
                             )),
                     ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "自动容量：读 {} MiB（本机内存 1/8，128 MiB–2 GiB）；写回推荐 {} MiB",
+                        iscsi_core::auto_read_cache_bytes() / 1_048_576,
+                        iscsi_core::recommended_write_back_bytes() / 1_048_576
+                    )),
             )
             .when(form.write_back, |panel| {
                 panel.child(

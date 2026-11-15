@@ -68,15 +68,19 @@ CLI 和核心 `benchmark` 同时要求显式破坏性确认及区域：
 
 ### 本地缓存
 
-**默认全部关闭**，与目标 MODE SENSE 页面中的 WCE/RCD 不同：这是每个会话独有的
-客户端内存，不会修改目标缓存策略，也不跨进程、重连或目标共享。
+**默认策略：读缓存按自动容量开启，写回关闭。** 与目标 MODE SENSE 页面中的 WCE/RCD 不同：
+这是每个会话独有的客户端内存，不会修改目标缓存策略，也不跨进程、重连或目标共享。
 
-- 读缓存：`--cache-size 64MiB`。固定 64 KiB 段、按字节预算的 LRU；
+- 读缓存：`--cache-size auto|<大小>|off`。`auto`（read 子命令的默认值）取本机内存的
+  1/8，限制在 128 MiB–2 GiB，按 64 MiB 向下取整；取不到内存信息时退回 512 MiB。
+  `bench` 默认 `off`，避免本地命中掩盖 LUN 真实吞吐；显式开启后吞吐数字含义随之改变。
+  固定 64 KiB 段、按字节预算的 LRU；
   仅字节偏移及长度都按段对齐时缓存，连续缺失段合并读取，每次不超过 1 MiB。
   非对齐请求整条透传。小于一个段的容量不保存任何段。
-- 默认写穿：`--write-back 0`。写入立即发送到 LUN，并失效重叠的本地读缓存；
+- 默认写穿：`--write-back off`（默认）。写入立即发送到 LUN，并失效重叠的本地读缓存；
   不额外发送 SYNCHRONIZE CACHE，保持原有完成语义。写穿不等于目标掉电持久化。
-- **危险的写回**：`--write-back <容量>` 必须同时提供 `--allow-destructive-write`。
+- **危险的写回**：`--write-back <容量|auto>` 必须同时提供 `--allow-destructive-write`；
+  `auto` 取推荐值：自动读容量的 1/4，限制在 64–256 MiB。
   对齐写入可以仅进内存就返回。超过脏容量、显式 `flush`、`logout`，或
   `--flush-interval <毫秒>` 到期时，按 LBA 升序合并写入，再统一发送一次
   SYNCHRONIZE CACHE（group commit）。只有全部成功才清除脏数据。
@@ -111,8 +115,9 @@ Rust API 为 `Session::enable_cache`、`read_cached`、`write_cached`、`cache_s
 `try_enable_cache` 返回错误，兼容的 `enable_cache` 则记录错误并保留原配置。
 定时刷写错误可通过 `cache_flush_error()` 观察，成功重试后清除。
 
-GUI 基准页提供独立开关和 MiB 容量，默认关闭、0；运行时应用配置。
-写回需要再次确认「允许写入」，会话页仅在缓存开启时显示命中率与脏数据。
+GUI 基准页读缓存默认「自动（推荐）」，写回默认关闭（预选「推荐（自动）」）；
+容量以下拉预设选择：读缓存 64 MiB–1 GiB，写回 64–512 MiB，自动/推荐值旁注明实际 MiB。
+写回需要再次确认「允许写入」，会话页仅在缓存开启时显示容量、命中率与脏数据。
 
 大块顺序读、工作集超过缓存或很少重复访问时通常没有收益，反而多一次内存拷贝。
 此前 NAS 后端约 165 MiB/s 的只读对照不能通过低命中率的客户端缓存消除。
@@ -176,7 +181,7 @@ crates/iscsi-core/src/error.rs        类型化错误
 crates/iscsi-core/src/wire.rs         BHS/PDU、CRC32C、文本键、CHAP 编解码与单元测试
 crates/iscsi-core/src/login.rs        TCP 调优、分阶段登录、CHAP 和参数/窗口协商
 crates/iscsi-core/src/session.rs      会话 API、socket owner、ITT 流水线与 SCSI 传输
-crates/iscsi-core/src/cache.rs        默认关闭的段 LRU、脏段及统计
+crates/iscsi-core/src/cache.rs        可开关的段 LRU、脏段、统计与自动容量
 crates/iscsi-core/src/scsi.rs         CDB、LUN、INQUIRY/VPD 和容量解析
 crates/iscsi-core/src/pool.rs         有界可复用缓冲区缓存
 crates/iscsi-core/src/stats.rs        原子计数与 EWMA 采样
