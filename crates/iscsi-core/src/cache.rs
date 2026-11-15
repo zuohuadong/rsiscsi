@@ -28,9 +28,15 @@ pub fn auto_read_cache_bytes() -> usize {
     *BUDGET.get_or_init(|| auto_read_cache_from(usable_memory_bytes()))
 }
 
-/// Recommended write-back size: 1/4 of the automatic read cache, clamped to 64 MiB-256 MiB.
+/// Recommended write-back size: 1/4 of the automatic read cache, clamped to 64 MiB-256 MiB,
+/// rounded down to a multiple of 64 MiB.
 pub fn recommended_write_back_bytes() -> usize {
-    (auto_read_cache_bytes() / 4).clamp(WRITE_BACK_MIN_BYTES, WRITE_BACK_MAX_BYTES)
+    recommended_write_back_from(auto_read_cache_bytes())
+}
+
+fn recommended_write_back_from(auto_read_bytes: usize) -> usize {
+    let clamped = (auto_read_bytes / 4).clamp(WRITE_BACK_MIN_BYTES, WRITE_BACK_MAX_BYTES);
+    clamped / (64 * MIB) * (64 * MIB)
 }
 
 fn auto_read_cache_from(memory: Option<u64>) -> usize {
@@ -276,6 +282,14 @@ mod tests {
             2 * 1024 * MIB
         );
         assert!(recommended_write_back_bytes().is_multiple_of(64 * MIB));
+    }
+
+    #[test]
+    fn recommended_write_back_is_clamped_and_rounded() {
+        assert_eq!(recommended_write_back_from(320 * MIB), 64 * MIB);
+        assert_eq!(recommended_write_back_from(896 * MIB), 192 * MIB);
+        assert_eq!(recommended_write_back_from(2 * 1024 * MIB), 256 * MIB);
+        assert_eq!(recommended_write_back_from(128 * MIB), 64 * MIB);
     }
 
     #[test]
