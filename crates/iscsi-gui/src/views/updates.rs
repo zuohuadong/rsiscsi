@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::tr;
 use crate::{disks::DiskState, engine::Event};
 
 impl Desktop {
@@ -14,7 +15,11 @@ impl Desktop {
             Event::Discovered(outcome) => match outcome {
                 Ok(targets) => {
                     self.discovery = Operation::Idle;
-                    self.log(format!("发现 {} 个目标", targets.len()));
+                    self.log(tr!(
+                        "发现 {} 个目标",
+                        "Discovered {} targets",
+                        targets.len()
+                    ));
                     self.discovered = targets;
                 }
                 Err(message) => self.discovery = Operation::Failed(message),
@@ -24,7 +29,7 @@ impl Desktop {
                 Ok(()) => {
                     self.disconnect = Operation::Idle;
                     self.clear_connection();
-                    self.log("会话已断开");
+                    self.log(tr!("会话已断开", "Session disconnected"));
                     if self.closing {
                         window.remove_window();
                     } else if let Some(index) = self.pending_target.take() {
@@ -32,8 +37,10 @@ impl Desktop {
                     }
                 }
                 Err(message) => {
-                    self.log(format!(
-                        "刷写或断开失败：{message}；会话及脏数据已保留，请重试断开"
+                    self.log(tr!(
+                        "刷写或断开失败：{message}；会话及脏数据已保留，请重试断开",
+                        "Flush or disconnect failed: {message}; session and dirty data retained; retry disconnecting",
+                        message = message
                     ));
                     self.disconnect = Operation::Failed(message);
                     self.closing = false;
@@ -58,7 +65,11 @@ impl Desktop {
                 self.retries = retries;
                 if cache_error != self.last_cache_error {
                     if let Some(error) = &cache_error {
-                        self.log(format!("定时刷写失败：{error}；脏数据已保留"));
+                        self.log(tr!(
+                            "定时刷写失败：{error}；脏数据已保留",
+                            "Scheduled flush failed: {error}; dirty data retained",
+                            error = error
+                        ));
                     }
                     self.last_cache_error = cache_error;
                 }
@@ -79,13 +90,15 @@ impl Desktop {
                     .is_some_and(|connection| connection.session.cache_stats().dirty_bytes > 0);
                 if dirty {
                     self.engine.stop_sampling();
-                    self.log("连接已终止，未刷写数据仍在内存；禁止换目标或退出");
+                    self.log(tr!("连接已终止，未刷写数据仍在内存；禁止换目标或退出", "Connection terminated; unflushed data remains in memory; target switching and quitting blocked"));
                 } else {
                     self.clear_connection();
                 }
-                self.connect = Operation::Failed("连接已终止，请重新连接".into());
+                self.connect = Operation::Failed(
+                    tr!("连接已终止，请重新连接", "Connection terminated; reconnect").into(),
+                );
                 self.bench_form.allow_write = false;
-                self.log("连接已终止");
+                self.log(tr!("连接已终止", "Connection terminated"));
             }
             Event::ConnectionClosed(_) => {}
             Event::BenchFinished(outcome) => {
@@ -104,20 +117,29 @@ impl Desktop {
                     Ok(disks) => {
                         for disk in &disks {
                             if let DiskState::Blank = disk.state {
-                                self.log(format!(
+                                self.log(tr!(
                                     "{} 未初始化；请在磁盘工具中确认后抹掉",
+                                    "{} is uninitialized; confirm in Disk Utility before erasing",
                                     disk.node()
                                 ));
                             }
                         }
                         if !disks.is_empty() {
-                            self.log(format!("发现 {} 个新的块设备", disks.len()));
+                            self.log(tr!(
+                                "发现 {} 个新的块设备",
+                                "Discovered {} new block devices",
+                                disks.len()
+                            ));
                         }
                         self.disks = disks;
                         self.disks_error = None;
                     }
                     Err(message) => {
-                        self.log(format!("磁盘探测失败：{message}"));
+                        self.log(tr!(
+                            "磁盘探测失败：{message}",
+                            "Disk scan failed: {message}",
+                            message = message
+                        ));
                         self.disks_error = Some(message);
                     }
                 }
@@ -140,7 +162,7 @@ impl Desktop {
                 }
                 self.config = config;
                 self.load = Operation::Idle;
-                self.log("目标配置已载入");
+                self.log(tr!("目标配置已载入", "Target configuration loaded"));
             }
             Err(message) => self.load = Operation::Failed(message),
         }
@@ -153,8 +175,12 @@ impl Desktop {
                     self.selected = config.targets.len().checked_sub(1);
                 }
                 self.config = config;
+                self.editor.is_new = false;
                 self.save = warning.map(Operation::Failed).unwrap_or_default();
-                self.log("目标配置已原子保存");
+                self.log(tr!(
+                    "目标配置已原子保存",
+                    "Target configuration saved atomically"
+                ));
             }
             Err(message) => self.save = Operation::Failed(message),
         }
@@ -179,14 +205,17 @@ impl Desktop {
                     cx,
                 );
                 self.connection = Some(connection);
-                self.log("连接成功；设备信息已读取");
+                self.log(tr!(
+                    "连接成功；设备信息已读取",
+                    "Connected; device information read"
+                ));
                 self.refresh_disks(cx);
                 if self.closing {
                     self.start_disconnect(cx);
                 }
             }
             Err(message) => {
-                self.log("连接失败");
+                self.log(tr!("连接失败", "Connection failed"));
                 self.connect = Operation::Failed(message);
                 if self.closing {
                     window.remove_window();
@@ -199,13 +228,13 @@ impl Desktop {
         self.bench_form.allow_write = false;
         match outcome {
             Ok(Some(report)) => {
-                self.log("基准测试完成");
+                self.log(tr!("基准测试完成", "Benchmark completed"));
                 self.report = Some(report);
                 self.bench = Operation::Idle;
             }
             Ok(None) => {
                 self.clear_connection();
-                self.log("测试已取消，会话已断开；已发送写入无法撤回");
+                self.log(tr!("测试已取消，会话已断开；已发送写入无法撤回", "Benchmark cancelled and session disconnected; submitted writes cannot be undone"));
                 self.bench = Operation::Idle;
             }
             Err(message) => {
@@ -216,8 +245,10 @@ impl Desktop {
                 if !retain {
                     self.clear_connection();
                 }
-                self.log(format!(
-                    "测试或刷写失败：{message}；未刷写数据保留，请重试断开"
+                self.log(tr!(
+                    "测试或刷写失败：{message}；未刷写数据保留，请重试断开",
+                    "Benchmark or flush failed: {message}; unflushed data retained; retry disconnecting",
+                    message = message
                 ));
                 self.closing = false;
                 self.pending_target = None;

@@ -1,2 +1,4 @@
 /target
+/dist
+/kext/build
 .DS_Store

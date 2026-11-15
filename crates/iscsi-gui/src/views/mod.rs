@@ -4,6 +4,7 @@ mod session;
 mod sidebar;
 mod updates;
 
+use crate::i18n::tr;
 use crate::{
     disks::DiskEntry,
     engine::{Connection, Engine},
@@ -94,7 +95,7 @@ impl Desktop {
             engine,
             config: Config::default(),
             selected: None,
-            editor: Editor::new(&crate::state::SavedTarget::default(), window, cx),
+            editor: Editor::new_target(window, cx),
             bench_form,
             connection: None,
             connection_generation: None,
@@ -176,7 +177,10 @@ impl Desktop {
         if let Some(connection) = &self.connection {
             let session = connection.session.clone();
             self.disconnect = Operation::Running;
-            self.log("正在刷写并断开会话");
+            self.log(tr!(
+                "正在刷写并断开会话",
+                "Flushing and disconnecting session"
+            ));
             self.engine.disconnect(session);
             cx.notify();
         }
@@ -190,7 +194,10 @@ impl Desktop {
         self.pending_target = None;
         if self.bench.running() {
             self.engine.cancel_benchmark();
-            self.log("退出前正在停止测试并刷写");
+            self.log(tr!(
+                "退出前正在停止测试并刷写",
+                "Stopping benchmark and flushing before quitting"
+            ));
         } else {
             self.start_disconnect(cx);
         }
@@ -208,7 +215,14 @@ impl Render for Desktop {
         };
         let connected = self.connection.is_some();
         let mut tabs = h_flex().gap_1();
-        for (index, label) in ["目标", "会话", "基准"].into_iter().enumerate() {
+        for (index, label) in [
+            tr!("目标", "Target"),
+            tr!("会话", "Session"),
+            tr!("基准", "Benchmark"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let active = self.tab == index;
             tabs = tabs.child(
                 div()
@@ -254,7 +268,10 @@ impl Render for Desktop {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("用户态客户端 · 不挂载磁盘"),
+                            .child(tr!(
+                                "用户态客户端 · 不挂载磁盘",
+                                "User-space client · No disk mounting"
+                            )),
                     )
                     .child(div().flex_1())
                     .child(self.status_pill(connected, cx)),
@@ -295,13 +312,13 @@ impl Render for Desktop {
 impl Desktop {
     fn status_pill(&self, connected: bool, cx: &Context<Self>) -> Div {
         let (color, text) = if connected {
-            (cx.theme().success, "已连接")
+            (cx.theme().success, tr!("已连接", "Connected"))
         } else if self.connect.running() {
-            (cx.theme().warning, "正在连接")
+            (cx.theme().warning, tr!("正在连接", "Connecting"))
         } else if matches!(self.connect, Operation::Failed(_)) {
-            (cx.theme().danger, "连接失败")
+            (cx.theme().danger, tr!("连接失败", "Connection failed"))
         } else {
-            (cx.theme().muted_foreground, "未连接")
+            (cx.theme().muted_foreground, tr!("未连接", "Not connected"))
         };
         h_flex()
             .gap_1()
@@ -326,9 +343,12 @@ impl Desktop {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(if self.connection.is_some() {
-                "单 TCP 连接 · 队列深度 32"
+                tr!(
+                    "单 TCP 连接 · 队列深度 32",
+                    "Single TCP connection · Queue depth 32"
+                )
             } else {
-                "空闲"
+                tr!("空闲", "Idle")
             })
             .child(div().flex_1())
             .child(
@@ -354,7 +374,12 @@ fn operation_line(label: &'static str, operation: &Operation, cx: &App) -> Optio
             } else {
                 cx.theme().muted_foreground
             })
-            .child(format!("{label}：{}", operation.label()))
+            .child(tr!(
+                "{label}：{}",
+                "{label}: {}",
+                operation.label(),
+                label = label
+            ))
     })
 }
 

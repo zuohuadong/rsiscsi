@@ -1,18 +1,19 @@
-//! 只读探测 macOS 是否已把某个 LUN 挂成块设备。
+//! Read-only detection of LUNs exposed as block devices by macOS.
 //!
-//! 本应用不创建块设备，也不执行初始化或抹掉；这里只读取 `diskutil` 的 plist
-//! 输出，把用户引导到「磁盘工具」或 Finder。
+//! This app never creates, initializes, or erases block devices; it only reads
+//! `diskutil` plist output to direct users to Disk Utility or Finder.
+use crate::i18n::tr;
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskState {
-    /// 没有分区表或文件系统，磁盘工具会显示为未初始化。
+    /// No partition table or file system; Disk Utility shows the disk as uninitialized.
     Blank,
-    /// 有分区表但没有可挂载的卷。
+    /// A partition table exists, but there are no mountable volumes.
     NoVolumes,
-    /// 至少一个卷已挂载。
+    /// At least one volume is mounted.
     Mounted(PathBuf),
 }
 
@@ -42,16 +43,16 @@ impl DiskEntry {
 
     pub fn status(&self) -> String {
         match &self.state {
-            DiskState::Blank => "未初始化".into(),
-            DiskState::NoVolumes => "无可用文件系统".into(),
+            DiskState::Blank => tr!("未初始化", "Uninitialized").into(),
+            DiskState::NoVolumes => tr!("无可用文件系统", "No usable file system").into(),
             DiskState::Mounted(_) => {
                 let mounts = self
                     .volumes
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
-                    .join("、");
-                format!("已挂载：{mounts}")
+                    .join(tr!("、", ", "));
+                tr!("已挂载：{mounts}", "Mounted: {mounts}", mounts = mounts)
             }
         }
     }
@@ -64,7 +65,7 @@ impl DiskEntry {
     }
 }
 
-/// 记录当前已有磁盘，之后只把新出现的或仍为空白的外置盘报给用户。
+/// Record existing disks so later scans only report new or still-blank external disks.
 pub fn whole_disks() -> Result<Vec<String>> {
     let value = diskutil_json(&["list", "-plist"])?;
     Ok(value
@@ -87,13 +88,16 @@ fn entries_from_json(value: &Value, known: &[String]) -> Result<Vec<DiskEntry>> 
     let disks = value
         .get("AllDisksAndPartitions")
         .and_then(Value::as_array)
-        .context("diskutil 输出缺少磁盘列表")?;
+        .context(tr!(
+            "diskutil 输出缺少磁盘列表",
+            "Disk list missing from diskutil output"
+        ))?;
     let mut entries = Vec::new();
     for disk in disks {
         let Some(id) = disk.get("DeviceIdentifier").and_then(Value::as_str) else {
             continue;
         };
-        // 只要整盘：分区形如 diskNsM，合成的 APFS 容器带 APFSPhysicalStores。
+        // Keep only whole disks: partitions use diskNsM; synthesized APFS containers have APFSPhysicalStores.
         let suffix = id.strip_prefix("disk").unwrap_or(id);
         if suffix.contains('s') || disk.get("APFSPhysicalStores").is_some() {
             continue;
@@ -168,12 +172,13 @@ fn diskutil_json(args: &[&str]) -> Result<Value> {
         let output = Command::new("/usr/sbin/diskutil")
             .args(args)
             .output()
-            .context("无法执行 diskutil")?;
+            .context(tr!("无法执行 diskutil", "Failed to run diskutil"))?;
         if !output.status.success() {
-            bail!(
+            bail!(tr!(
                 "diskutil 失败：{}",
+                "diskutil failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
-            );
+            ));
         }
         let mut child = Command::new("/usr/bin/plutil")
             .args(["-convert", "json", "-o", "-", "-"])
@@ -181,26 +186,35 @@ fn diskutil_json(args: &[&str]) -> Result<Value> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("无法执行 plutil")?;
+            .context(tr!("无法执行 plutil", "Failed to run plutil"))?;
         child
             .stdin
             .as_mut()
-            .context("无法写入 plutil")?
+            .context(tr!("无法写入 plutil", "Failed to write to plutil"))?
             .write_all(&output.stdout)
-            .context("无法写入 plutil")?;
-        let converted = child.wait_with_output().context("plutil 未完成")?;
+            .context(tr!("无法写入 plutil", "Failed to write to plutil"))?;
+        let converted = child
+            .wait_with_output()
+            .context(tr!("plutil 未完成", "plutil did not complete"))?;
         if !converted.status.success() {
-            bail!(
+            bail!(tr!(
                 "plutil 失败：{}",
+                "plutil failed: {}",
                 String::from_utf8_lossy(&converted.stderr).trim()
-            );
+            ));
         }
-        serde_json::from_slice(&converted.stdout).context("无法解析 diskutil JSON")
+        serde_json::from_slice(&converted.stdout).context(tr!(
+            "无法解析 diskutil JSON",
+            "Failed to parse diskutil JSON"
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = args;
-        bail!("磁盘探测仅支持 macOS")
+        bail!(tr!(
+            "磁盘探测仅支持 macOS",
+            "Disk scanning is only supported on macOS"
+        ))
     }
 }
 
@@ -216,9 +230,13 @@ fn open(args: &[&str]) -> Result<()> {
     let status = std::process::Command::new("open")
         .args(args)
         .status()
-        .context("无法执行 open")?;
+        .context(tr!("无法执行 open", "Failed to run open"))?;
     if !status.success() {
-        bail!("open 退出码 {status}");
+        bail!(tr!(
+            "open 退出码 {status}",
+            "open exit status: {status}",
+            status = status
+        ));
     }
     Ok(())
 }
@@ -278,11 +296,18 @@ mod tests {
             ]
         });
         let entries = entries_from_json(&value, &[]).unwrap();
-        assert_eq!(entries.len(), 1, "容器本身不应再算一个磁盘");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the container must not count as another disk"
+        );
         assert_eq!(
             entries[0].state,
             DiskState::Mounted(PathBuf::from("/Volumes/Datas"))
         );
-        assert_eq!(entries[0].status(), "已挂载：/Volumes/Datas");
+        assert_eq!(
+            entries[0].status(),
+            tr!("已挂载：/Volumes/Datas", "Mounted: /Volumes/Datas")
+        );
     }
 }

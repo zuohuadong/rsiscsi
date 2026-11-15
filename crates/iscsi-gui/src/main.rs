@@ -1,9 +1,11 @@
 mod disks;
 mod engine;
+mod i18n;
 mod state;
 mod termination;
 mod views;
 
+use crate::i18n::tr;
 use gpui_kit::*;
 use std::{process::ExitCode, time::Duration};
 use tokio::runtime::Runtime;
@@ -11,10 +13,18 @@ use tokio::runtime::Runtime;
 actions!(iscsi, [Quit]);
 
 fn main() -> ExitCode {
+    i18n::init();
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("无法启动异步运行时：{error}");
+            eprintln!(
+                "{}",
+                tr!(
+                    "无法启动异步运行时：{error}",
+                    "Failed to start async runtime: {error}",
+                    error = error
+                )
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -28,12 +38,12 @@ fn main() -> ExitCode {
     };
     application().with_assets(assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
-        component::set_locale("zh-CN");
+        component::set_locale(i18n::locale());
         theme::install(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus([Menu {
             name: "iSCSI".into(),
-            items: vec![MenuItem::action("退出 iSCSI", Quit)],
+            items: vec![MenuItem::action(tr!("退出 iSCSI", "Quit iSCSI"), Quit)],
             disabled: false,
         }]);
         cx.on_window_closed(|cx, _| {
@@ -61,7 +71,14 @@ fn main() -> ExitCode {
             window.set_window_title("iSCSI");
             cx.new(|cx| views::Desktop::new(handle, quit_requests, window, cx))
         }) {
-            eprintln!("无法打开窗口：{error}");
+            eprintln!(
+                "{}",
+                tr!(
+                    "无法打开窗口：{error}",
+                    "Failed to open window: {error}",
+                    error = error
+                )
+            );
             termination::allow();
             cx.quit();
         }

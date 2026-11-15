@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::tr;
 use crate::state::SavedTarget;
 use anyhow::{Context as _, Result};
 use component::{
@@ -24,6 +25,7 @@ pub enum Field {
 
 pub struct Editor {
     inputs: [Entity<InputState>; 9],
+    pub(super) is_new: bool,
     pub header_digest: bool,
     pub data_digest: bool,
 }
@@ -53,9 +55,36 @@ impl Editor {
         });
         Self {
             inputs,
+            is_new: false,
             header_digest: target.header_digest,
             data_digest: target.data_digest,
         }
+    }
+
+    pub(super) fn new_target(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            is_new: true,
+            ..Self::new(&SavedTarget::default(), window, cx)
+        }
+    }
+
+    pub(super) fn focus_host(&mut self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.inputs[Field::Host as usize].focus_handle(cx), cx);
+    }
+
+    pub(super) fn has_input(&self, cx: &App) -> bool {
+        let defaults = SavedTarget::default();
+        // Ignore prefilled defaults when checking for input that would be discarded.
+        [Field::Host, Field::Iqn, Field::User, Field::Secret]
+            .into_iter()
+            .any(|field| !self.text(field, cx).is_empty())
+            || self.text(Field::Name, cx) != defaults.name
+            || self.text(Field::Initiator, cx) != defaults.initiator_name
+            || self.text(Field::Port, cx) != defaults.port.to_string()
+            || self.text(Field::Lun, cx) != defaults.lun.to_string()
+            || self.text(Field::Queue, cx) != defaults.queue_depth.to_string()
+            || self.header_digest
+            || self.data_digest
     }
 
     pub fn text(&self, field: Field, cx: &App) -> String {
@@ -69,19 +98,19 @@ impl Editor {
             port: self
                 .text(Field::Port, cx)
                 .parse()
-                .context("端口必须为整数")?,
+                .context(tr!("端口必须为整数", "Port must be an integer"))?,
             iqn: self.text(Field::Iqn, cx),
-            lun: self
-                .text(Field::Lun, cx)
-                .parse()
-                .context("LUN 必须为非负整数")?,
+            lun: self.text(Field::Lun, cx).parse().context(tr!(
+                "LUN 必须为非负整数",
+                "LUN must be a non-negative integer"
+            ))?,
             chap_user: self.text(Field::User, cx),
             chap_secret: self.text(Field::Secret, cx),
             initiator_name: self.text(Field::Initiator, cx),
             queue_depth: self
                 .text(Field::Queue, cx)
                 .parse()
-                .context("队列深度必须为整数")?,
+                .context(tr!("队列深度必须为整数", "Queue depth must be an integer"))?,
             header_digest: self.header_digest,
             data_digest: self.data_digest,
         };
@@ -120,19 +149,23 @@ impl Desktop {
     pub(super) fn editor_view(&self, cx: &mut Context<Self>) -> Div {
         let disabled = self.locked() || self.save.running() || self.load.running();
         let controls = [
-            ("名称", Field::Name),
-            ("主机", Field::Host),
-            ("端口", Field::Port),
+            (tr!("名称", "Name"), Field::Name),
+            (tr!("主机", "Host"), Field::Host),
+            (tr!("端口", "Port"), Field::Port),
             ("IQN", Field::Iqn),
             ("LUN", Field::Lun),
-            ("CHAP 用户", Field::User),
-            ("CHAP 密码", Field::Secret),
-            ("发起端名称", Field::Initiator),
-            ("连接队列深度", Field::Queue),
+            (tr!("CHAP 用户", "CHAP user"), Field::User),
+            (tr!("CHAP 密码", "CHAP password"), Field::Secret),
+            (tr!("发起端名称", "Initiator name"), Field::Initiator),
+            (tr!("连接队列深度", "Connection queue depth"), Field::Queue),
         ];
         v_flex()
             .gap_3()
-            .child(heading("目标配置"))
+            .child(heading(if self.editor.is_new {
+                tr!("新增目标", "New target")
+            } else {
+                tr!("编辑目标", "Edit target")
+            }))
             .child(
                 h_flex()
                     .gap_2()
@@ -140,7 +173,7 @@ impl Desktop {
                         Button::new("paste")
                             .small()
                             .icon(assets::IconName::ClipboardPaste)
-                            .label("粘贴 URL")
+                            .label(tr!("粘贴 URL", "Paste URL"))
                             .disabled(disabled)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.paste_url(window, cx)),
@@ -151,14 +184,14 @@ impl Desktop {
                             .small()
                             .primary()
                             .icon(assets::IconName::Save)
-                            .label("保存目标")
+                            .label(tr!("保存目标", "Save target"))
                             .disabled(disabled || matches!(self.load, Operation::Failed(_)))
                             .on_click(cx.listener(|this, _, _, cx| this.save_target(cx))),
                     ),
             )
-            .children(operation_line("载入", &self.load, cx))
-            .children(operation_line("导入", &self.edit, cx))
-            .children(operation_line("保存", &self.save, cx))
+            .children(operation_line(tr!("载入", "Load"), &self.load, cx))
+            .children(operation_line(tr!("导入", "Import"), &self.edit, cx))
+            .children(operation_line(tr!("保存", "Save"), &self.save, cx))
             .child(
                 div()
                     .grid()
@@ -174,7 +207,7 @@ impl Desktop {
                     .child(
                         Checkbox::new("header-digest")
                             .small()
-                            .label("头部 CRC32C")
+                            .label(tr!("头部 CRC32C", "Header CRC32C"))
                             .checked(self.editor.header_digest)
                             .disabled(disabled)
                             .on_change(cx.listener(|this, checked, _, cx| {
@@ -185,7 +218,7 @@ impl Desktop {
                     .child(
                         Checkbox::new("data-digest")
                             .small()
-                            .label("数据 CRC32C")
+                            .label(tr!("数据 CRC32C", "Data CRC32C"))
                             .checked(self.editor.data_digest)
                             .disabled(disabled)
                             .on_change(cx.listener(|this, checked, _, cx| {
@@ -206,9 +239,14 @@ impl Desktop {
             .and_then(|clipboard| clipboard.text());
         let parsed = imported
             .as_deref()
-            .ok_or("剪贴板没有 URL")
+            .ok_or(tr!("剪贴板没有 URL", "No URL in clipboard"))
             .and_then(|text| {
-                TargetUrl::parse(text, Some(&fallback)).map_err(|_| "URL 无效；原配置未改动")
+                TargetUrl::parse(text, Some(&fallback)).map_err(|_| {
+                    tr!(
+                        "URL 无效；原配置未改动",
+                        "Invalid URL; original configuration unchanged"
+                    )
+                })
             });
         match parsed {
             Ok(url) => {
@@ -230,9 +268,11 @@ impl Desktop {
                     header_digest: self.editor.header_digest,
                     data_digest: self.editor.data_digest,
                 };
+                let is_new = self.editor.is_new;
                 self.editor = Editor::new(&saved, window, cx);
+                self.editor.is_new = is_new;
                 self.edit = Operation::Idle;
-                self.log("已导入目标 URL");
+                self.log(tr!("已导入目标 URL", "Target URL imported"));
             }
             Err(message) => self.edit = Operation::Failed(message.into()),
         }

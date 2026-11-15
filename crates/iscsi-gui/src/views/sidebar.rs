@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::tr;
 use crate::state::SavedTarget;
 use component::{Sizable, input::Input};
 
@@ -18,7 +19,7 @@ impl Desktop {
                 v_flex()
                     .p_2()
                     .gap_1()
-                    .child(caption("目标", cx))
+                    .child(caption(tr!("目标", "Target"), cx))
                     .when(self.config.targets.is_empty(), |list| {
                         list.child(
                             div()
@@ -26,7 +27,7 @@ impl Desktop {
                                 .py_2()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("尚无保存的目标"),
+                                .child(tr!("尚无保存的目标", "No saved targets")),
                         )
                     })
                     .children(
@@ -93,17 +94,39 @@ impl Desktop {
                                     .text_color(cx.theme().foreground)
                             })
                             .child(component::Icon::new(assets::IconName::Plus).xsmall())
-                            .child("新增目标")
+                            .child(tr!("新增目标", "New target"))
                             .when(locked, |row| row.opacity(0.5))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if this.locked() || this.save.running() || this.load.running() {
+                                    let reason = if this.closing {
+                                        tr!("正在关闭，请稍后再新增目标", "Closing; wait before adding a target")
+                                    } else if this.bench.running() {
+                                        tr!("正在进行基准测试，请先停止测试并断开会话再新增目标", "Benchmark running; stop it and disconnect the session before adding a target")
+                                    } else if this.disconnect.running() {
+                                        tr!("正在断开会话，请稍后再新增目标", "Disconnecting session; wait before adding a target")
+                                    } else if this.connect.running() {
+                                        tr!("正在连接，请等待连接结束并断开会话再新增目标", "Connecting; wait for completion and disconnect the session before adding a target")
+                                    } else if this.connection.is_some() {
+                                        tr!("已连接，请先断开会话再新增目标", "Connected; disconnect the session before adding a target")
+                                    } else if this.save.running() {
+                                        tr!("正在保存目标，请稍后再新增目标", "Saving target; wait before adding a target")
+                                    } else {
+                                        tr!("正在载入目标，请稍后再新增目标", "Loading target; wait before adding a target")
+                                    };
+                                    this.log(reason);
+                                    cx.notify();
                                     return;
                                 }
+                                if this.editor.has_input(cx) {
+                                    this.log(tr!("已放弃未保存的编辑", "Unsaved edits discarded"));
+                                }
                                 this.selected = None;
-                                this.editor = Editor::new(&SavedTarget::default(), window, cx);
+                                this.editor = Editor::new_target(window, cx);
                                 this.edit = Operation::Idle;
                                 this.save = Operation::Idle;
                                 this.tab = 0;
+                                this.editor.focus_host(window, cx);
+                                this.log(tr!("已新建目标表单", "New target form opened"));
                                 cx.notify();
                             })),
                     )
@@ -114,10 +137,10 @@ impl Desktop {
                             .gap_1()
                             .border_t_1()
                             .border_color(cx.theme().border)
-                            .child(caption("发现目标", cx))
+                            .child(caption(tr!("发现目标", "Discover targets"), cx))
                             .child(
                                 Input::new(&self.discovery_host)
-                                    .aria_label("发现主机")
+                                    .aria_label(tr!("发现主机", "Discovery host"))
                                     .small()
                                     .disabled(self.discovery.running()),
                             )
@@ -125,13 +148,13 @@ impl Desktop {
                                 Button::new("discover")
                                     .xsmall()
                                     .icon(assets::IconName::Search)
-                                    .label("发现")
+                                    .label(tr!("发现", "Discover"))
                                     .disabled(self.discovery.running() || self.load.running())
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.start_discovery(cx)),
                                     ),
                             )
-                            .children(operation_line("发现", &self.discovery, cx))
+                            .children(operation_line(tr!("发现", "Discovery"), &self.discovery, cx))
                             .children(self.discovered.iter().enumerate().map(|(index, target)| {
                                 v_flex()
                                     .gap_1()
@@ -146,7 +169,7 @@ impl Desktop {
                                     .child(
                                         Button::new(("use-discovery", index))
                                             .xsmall()
-                                            .label("编辑此目标")
+                                            .label(tr!("编辑此目标", "Edit this target"))
                                             .disabled(locked)
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.use_discovered(index, window, cx)
@@ -193,7 +216,8 @@ impl Desktop {
     fn start_discovery(&mut self, cx: &mut Context<Self>) {
         let host = self.discovery_host.read(cx).value().to_string();
         if host.is_empty() || host.chars().any(char::is_control) {
-            self.discovery = Operation::Failed("请填写发现主机".into());
+            self.discovery =
+                Operation::Failed(tr!("请填写发现主机", "Enter a discovery host").into());
         } else {
             let target = SavedTarget {
                 host,
@@ -222,6 +246,7 @@ impl Desktop {
                 ..SavedTarget::default()
             };
             self.editor = Editor::new(&saved, window, cx);
+            self.editor.is_new = true;
             self.selected = None;
             self.tab = 0;
             self.edit = Operation::Idle;

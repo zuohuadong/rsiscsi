@@ -7,7 +7,7 @@ license.workspace = true
 description = "Command line front-end for the Rust iSCSI initiator"
 
 [[bin]]
-name = "iscsi-rs"
+name = "rsiscsi"
 path = "src/main.rs"
 
 [dependencies]

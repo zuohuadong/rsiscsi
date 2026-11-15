@@ -9,49 +9,64 @@ use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 #[derive(Parser)]
 #[command(
-    name = "iscsi-rs",
+    name = "rsiscsi",
     version,
     about = "Rust iSCSI 用户态客户端（不挂载磁盘）"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// 以 JSON 输出结果
+    // Output results as JSON.
+    #[arg(help = "以 JSON 输出结果")]
     #[arg(long, global = true)]
     json: bool,
-    /// 启用 TCP_NODELAY，可用 --nodelay=false 关闭
+    // Enable TCP_NODELAY; disable with --nodelay=false.
+    #[arg(help = "启用 TCP_NODELAY，可用 --nodelay=false 关闭")]
     #[arg(long, global = true, default_value_t = true, action = clap::ArgAction::Set)]
     nodelay: bool,
-    /// 启用头部 CRC32C
+    // Enable header CRC32C.
+    #[arg(help = "启用头部 CRC32C")]
     #[arg(long, global = true)]
     header_digest: bool,
-    /// 启用数据 CRC32C
+    // Enable data CRC32C.
+    #[arg(help = "启用数据 CRC32C")]
     #[arg(long, global = true)]
     data_digest: bool,
-    /// 本地读缓存容量：大小或 auto/off；read 默认 auto（内存 1/8，128 MiB–2 GiB），
-    /// bench 默认关闭以免命中掩盖 LUN 真实吞吐
+    // Local read cache size or auto/off. Reads default to auto (1/8 of memory, 128 MiB-2 GiB);
+    // benchmarks default to off so cache hits do not mask actual LUN throughput.
+    #[arg(
+        help = "本地读缓存容量：大小或 auto/off；read 默认 auto（内存 1/8，128 MiB–2 GiB）， bench 默认关闭以免命中掩盖 LUN 真实吞吐"
+    )]
     #[arg(long, global = true, value_parser = parse_read_cache_size)]
     cache_size: Option<usize>,
-    /// 危险：内存写回容量，auto 取推荐值；崩溃或断电会丢失未刷写数据
+    // Dangerous: in-memory write-back size; auto uses the recommendation.
+    // A crash or power loss discards unflushed data.
+    #[arg(help = "危险：内存写回容量，auto 取推荐值；崩溃或断电会丢失未刷写数据")]
     #[arg(long, global = true, default_value = "0", value_parser = parse_write_back_size)]
     write_back: usize,
-    /// 写回刷写间隔（毫秒），仅写回开启时有效
+    // Write-back flush interval in milliseconds; only applies when write-back is enabled.
+    #[arg(help = "写回刷写间隔（毫秒），仅写回开启时有效")]
     #[arg(long, global = true)]
     flush_interval: Option<u64>,
-    /// 确认破坏指定区域内的已有数据
+    // Confirm destruction of existing data in the specified range.
+    #[arg(help = "确认破坏指定区域内的已有数据")]
     #[arg(long, global = true)]
     allow_destructive_write: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// 发现目标
+    // Discover targets.
+    #[command(about = "发现目标")]
     Discover(Portal),
-    /// 列出逻辑单元
+    // List logical units.
+    #[command(about = "列出逻辑单元")]
     Ls(TargetArgs),
-    /// 查询设备标识、容量及协商参数
+    // Query device identification, capacity, and negotiated parameters.
+    #[command(about = "查询设备标识、容量及协商参数")]
     Inq(TargetArgs),
-    /// 读取逻辑块到文件
+    // Read logical blocks into a file.
+    #[command(about = "读取逻辑块到文件")]
     Read {
         #[command(flatten)]
         target: TargetArgs,
@@ -61,11 +76,13 @@ enum Command {
         blocks: u32,
         #[arg(long)]
         out: PathBuf,
-        /// 同一会话内重复读取；可验证本地读缓存命中
+        // Repeat reads within one session to verify local read cache hits.
+        #[arg(help = "同一会话内重复读取；可验证本地读缓存命中")]
         #[arg(long, default_value_t = 1)]
         repeat: u32,
     },
-    /// 测试吞吐量、IOPS 和延迟（写入会破坏数据）
+    // Benchmark throughput, IOPS, and latency (writes destroy data).
+    #[command(about = "测试吞吐量、IOPS 和延迟（写入会破坏数据）")]
     Bench {
         #[command(flatten)]
         target: TargetArgs,
@@ -73,18 +90,22 @@ enum Command {
         pattern: Pattern,
         #[arg(long, default_value = "1MiB", value_parser = parse_size)]
         bs: usize,
-        /// 逗号分隔的队列深度
+        // Comma-separated queue depths.
+        #[arg(help = "逗号分隔的队列深度")]
         #[arg(long, default_value = "16", value_delimiter = ',')]
         qd: Vec<usize>,
-        /// 正式测试秒数
+        // Measurement duration in seconds.
+        #[arg(help = "正式测试秒数")]
         #[arg(long, default_value_t = 10)]
         duration: u64,
-        /// 预热秒数
+        // Warm-up duration in seconds.
+        #[arg(help = "预热秒数")]
         #[arg(long, default_value_t = 1)]
         warmup: u64,
         #[arg(long, default_value_t = 0)]
         start_lba: u64,
-        /// 限定测试区域的逻辑块数（写入测试必填）
+        // Limit the test range in logical blocks; required for write benchmarks.
+        #[arg(help = "限定测试区域的逻辑块数（写入测试必填）")]
         #[arg(long)]
         range_blocks: Option<u64>,
     },
@@ -483,7 +504,7 @@ mod tests {
         Cli::command().debug_assert();
         assert!(
             Cli::try_parse_from([
-                "iscsi-rs",
+                "rsiscsi",
                 "inq",
                 "--host",
                 "h",
@@ -495,7 +516,7 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "iscsi-rs", "bench", "--host", "h", "--iqn", "i", "--bs", "1MiB", "--qd", "1,16"
+                "rsiscsi", "bench", "--host", "h", "--iqn", "i", "--bs", "1MiB", "--qd", "1,16"
             ])
             .is_ok()
         );
@@ -525,7 +546,7 @@ mod tests {
     #[test]
     fn read_defaults_to_auto_cache_and_bench_stays_direct() {
         let read = Cli::try_parse_from([
-            "iscsi-rs", "read", "--host", "h", "--iqn", "i", "--blocks", "1", "--out", "/tmp/x",
+            "rsiscsi", "read", "--host", "h", "--iqn", "i", "--blocks", "1", "--out", "/tmp/x",
         ])
         .unwrap();
         assert_eq!(
@@ -533,7 +554,7 @@ mod tests {
             auto_read_cache_bytes()
         );
         let off = Cli::try_parse_from([
-            "iscsi-rs",
+            "rsiscsi",
             "read",
             "--host",
             "h",
@@ -548,11 +569,10 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cache_config(&off).unwrap().read_capacity_bytes, 0);
-        let bench =
-            Cli::try_parse_from(["iscsi-rs", "bench", "--host", "h", "--iqn", "i"]).unwrap();
+        let bench = Cli::try_parse_from(["rsiscsi", "bench", "--host", "h", "--iqn", "i"]).unwrap();
         assert_eq!(cache_config(&bench).unwrap().read_capacity_bytes, 0);
         let tiny = Cli::try_parse_from([
-            "iscsi-rs",
+            "rsiscsi",
             "read",
             "--host",
             "h",
@@ -572,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn cache_safety_rejects_before_network_and_preserves_defaults() {
         let defaults =
-            Cli::try_parse_from(["iscsi-rs", "inq", "--host", "invalid", "--iqn", "i"]).unwrap();
+            Cli::try_parse_from(["rsiscsi", "inq", "--host", "invalid", "--iqn", "i"]).unwrap();
         assert_eq!(cache_config(&defaults).unwrap(), CacheConfig::default());
         for flags in [
             vec!["--write-back", "1MiB"],
@@ -585,13 +605,13 @@ mod tests {
                 "0",
             ],
         ] {
-            let mut args = vec!["iscsi-rs", "inq", "--host", "invalid", "--iqn", "i"];
+            let mut args = vec!["rsiscsi", "inq", "--host", "invalid", "--iqn", "i"];
             args.extend(flags);
             let cli = Cli::try_parse_from(args).unwrap();
             assert_eq!(run(&cli).await.err().unwrap().code, 2);
         }
         let cli = Cli::try_parse_from([
-            "iscsi-rs",
+            "rsiscsi",
             "--allow-destructive-write",
             "bench",
             "--host",

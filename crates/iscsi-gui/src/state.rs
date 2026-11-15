@@ -1,3 +1,4 @@
+use crate::i18n::tr;
 use anyhow::{Context, Result, bail};
 use iscsi_core::{
     BenchOptions, BenchPattern, CacheConfig, Capacity, ChapCredentials, SessionOptions, Target,
@@ -27,9 +28,9 @@ impl Operation {
     }
     pub fn label(&self) -> String {
         match self {
-            Self::Idle => "就绪".into(),
-            Self::Running => "正在处理…".into(),
-            Self::Failed(message) => format!("失败：{message}"),
+            Self::Idle => tr!("就绪", "Ready").into(),
+            Self::Running => tr!("正在处理…", "Working...").into(),
+            Self::Failed(message) => tr!("失败：{message}", "Failed: {message}", message = message),
         }
     }
 }
@@ -54,7 +55,7 @@ pub struct SavedTarget {
 impl Default for SavedTarget {
     fn default() -> Self {
         Self {
-            name: "新目标".into(),
+            name: tr!("新目标", "New target").into(),
             host: String::new(),
             port: 3260,
             iqn: String::new(),
@@ -73,14 +74,23 @@ impl SavedTarget {
     pub fn validate(&self) -> Result<()> {
         for text in [&self.host, &self.iqn, &self.initiator_name] {
             if text.is_empty() || text.chars().any(char::is_control) {
-                bail!("主机、IQN 和发起端名称不能为空或包含控制字符");
+                bail!(tr!(
+                    "主机、IQN 和发起端名称不能为空或包含控制字符",
+                    "Host, IQN and initiator name must not be empty or contain control characters"
+                ));
             }
         }
         if self.port == 0 || !(1..=128).contains(&self.queue_depth) {
-            bail!("端口须为 1–65535，队列深度须为 1–128");
+            bail!(tr!(
+                "端口须为 1–65535，队列深度须为 1–128",
+                "Port must be 1-65535; queue depth must be 1-128"
+            ));
         }
         if self.chap_user.is_empty() != self.chap_secret.is_empty() {
-            bail!("CHAP 用户名和密码必须同时填写");
+            bail!(tr!(
+                "CHAP 用户名和密码必须同时填写",
+                "CHAP username and password must both be provided"
+            ));
         }
         Ok(())
     }
@@ -117,27 +127,92 @@ pub struct Config {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("无法确定用户主目录")?;
-    Ok(PathBuf::from(home).join("Library/Application Support/iscsi-rs/targets.toml"))
+    let home = std::env::var_os("HOME")
+        .context(tr!("无法确定用户主目录", "Cannot determine home directory"))?;
+    Ok(config_path_in(Path::new(&home)))
+}
+
+fn config_path_in(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/rsiscsi/targets.toml")
 }
 
 pub fn load_config(path: &Path) -> Result<Config> {
     match fs::read_to_string(path) {
-        Ok(text) => {
-            toml::from_str(&text).map_err(|_| anyhow::anyhow!("目标配置格式无效；原文件未改动"))
+        Ok(text) => toml::from_str(&text).map_err(|_| {
+            anyhow::anyhow!(tr!(
+                "目标配置格式无效；原文件未改动",
+                "Invalid target configuration; original file unchanged"
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match migrate_legacy_config(path) {
+                Ok(config) => Ok(config),
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        tr!(
+                            "警告：迁移旧目标配置失败，使用空目标列表：{error}",
+                            "Warning: failed to migrate legacy target configuration; using an empty target list: {error}",
+                            error = error
+                        )
+                    );
+                    Ok(Config::default())
+                }
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(error) => Err(error).context("读取目标配置失败"),
+        Err(error) => Err(error).context(tr!(
+            "读取目标配置失败",
+            "Failed to read target configuration"
+        )),
     }
+}
+
+fn migrate_legacy_config(path: &Path) -> Result<Config> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "rsiscsi"))
+    else {
+        return Ok(Config::default());
+    };
+    let legacy_path = parent.with_file_name("iscsi-rs").join("targets.toml");
+    let text = match fs::read_to_string(legacy_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(error) => {
+            return Err(error).context(tr!(
+                "读取旧目标配置失败",
+                "Failed to read legacy target configuration"
+            ));
+        }
+    };
+    let config = toml::from_str(&text).map_err(|_| {
+        anyhow::anyhow!(tr!(
+            "旧目标配置格式无效；原文件未改动",
+            "Invalid legacy target configuration; original file unchanged"
+        ))
+    })?;
+    if let Some(warning) = save_config(path, &config)? {
+        eprintln!(
+            "{}",
+            tr!("警告：{warning}", "Warning: {warning}", warning = warning)
+        );
+    }
+    Ok(config)
 }
 
 pub fn save_config(path: &Path, config: &Config) -> Result<Option<String>> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let parent = path.parent().context("配置路径没有父目录")?;
+    let parent = path.parent().context(tr!(
+        "配置路径没有父目录",
+        "Configuration path has no parent directory"
+    ))?;
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let directory = fs::File::open(parent)?;
-    let encoded = toml::to_string_pretty(config).context("无法编码目标配置")?;
+    let encoded = toml::to_string_pretty(config).context(tr!(
+        "无法编码目标配置",
+        "Failed to encode target configuration"
+    ))?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -152,10 +227,13 @@ pub fn save_config(path: &Path, config: &Config) -> Result<Option<String>> {
         output.sync_all()?;
         fs::rename(&temporary, path)?;
         // Rename has committed. A durability warning must not roll memory back.
-        Ok(directory
-            .sync_all()
-            .err()
-            .map(|_| "配置已保存，但目录持久化确认失败".into()))
+        Ok(directory.sync_all().err().map(|_| {
+            tr!(
+                "配置已保存，但目录持久化确认失败",
+                "Configuration saved, but directory durability could not be confirmed"
+            )
+            .into()
+        }))
     })();
     if outcome.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -176,55 +254,59 @@ pub struct BenchSettings {
 #[derive(Debug, Clone, Copy)]
 pub struct CachePreset {
     pub label: &'static str,
-    /// `None` 表示自动：读缓存按本机内存计算，写回取推荐值。
+    /// `None` selects automatic sizing: local memory for reads, the recommendation for write-back.
     pub mib: Option<usize>,
 }
 
-pub const READ_CACHE_PRESETS: [CachePreset; 6] = [
-    CachePreset {
-        label: "自动（推荐）",
-        mib: None,
-    },
-    CachePreset {
-        label: "64 MiB",
-        mib: Some(64),
-    },
-    CachePreset {
-        label: "128 MiB",
-        mib: Some(128),
-    },
-    CachePreset {
-        label: "256 MiB",
-        mib: Some(256),
-    },
-    CachePreset {
-        label: "512 MiB",
-        mib: Some(512),
-    },
-    CachePreset {
-        label: "1 GiB",
-        mib: Some(1024),
-    },
-];
+pub fn read_cache_presets() -> [CachePreset; 6] {
+    [
+        CachePreset {
+            label: tr!("自动（推荐）", "Automatic (recommended)"),
+            mib: None,
+        },
+        CachePreset {
+            label: "64 MiB",
+            mib: Some(64),
+        },
+        CachePreset {
+            label: "128 MiB",
+            mib: Some(128),
+        },
+        CachePreset {
+            label: "256 MiB",
+            mib: Some(256),
+        },
+        CachePreset {
+            label: "512 MiB",
+            mib: Some(512),
+        },
+        CachePreset {
+            label: "1 GiB",
+            mib: Some(1024),
+        },
+    ]
+}
 
-pub const WRITE_BACK_PRESETS: [CachePreset; 4] = [
-    CachePreset {
-        label: "推荐（自动）",
-        mib: None,
-    },
-    CachePreset {
-        label: "64 MiB",
-        mib: Some(64),
-    },
-    CachePreset {
-        label: "256 MiB",
-        mib: Some(256),
-    },
-    CachePreset {
-        label: "512 MiB",
-        mib: Some(512),
-    },
-];
+pub fn write_back_presets() -> [CachePreset; 4] {
+    [
+        CachePreset {
+            label: tr!("推荐（自动）", "Recommended (automatic)"),
+            mib: None,
+        },
+        CachePreset {
+            label: "64 MiB",
+            mib: Some(64),
+        },
+        CachePreset {
+            label: "256 MiB",
+            mib: Some(256),
+        },
+        CachePreset {
+            label: "512 MiB",
+            mib: Some(512),
+        },
+    ]
+}
 
 pub struct CacheSettings {
     pub read_enabled: bool,
@@ -234,7 +316,7 @@ pub struct CacheSettings {
 }
 
 impl Default for CacheSettings {
-    /// 读缓存默认开启自动容量；写回保持关闭，行为与未引入缓存时一致。
+    /// Enable automatic read caching by default; keep write-back off to preserve pre-cache write behavior.
     fn default() -> Self {
         Self {
             read_enabled: true,
@@ -248,7 +330,7 @@ impl Default for CacheSettings {
 impl CacheSettings {
     pub fn read_capacity(&self) -> Result<usize> {
         Self::preset_bytes(
-            &READ_CACHE_PRESETS,
+            &read_cache_presets(),
             self.read_preset,
             auto_read_cache_bytes(),
         )
@@ -256,23 +338,30 @@ impl CacheSettings {
 
     pub fn write_back_capacity(&self) -> Result<usize> {
         Self::preset_bytes(
-            &WRITE_BACK_PRESETS,
+            &write_back_presets(),
             self.write_preset,
             recommended_write_back_bytes(),
         )
     }
 
     fn preset_bytes(presets: &[CachePreset], index: usize, automatic: usize) -> Result<usize> {
-        let preset = presets.get(index).context("无效的缓存容量选项")?;
+        let preset = presets
+            .get(index)
+            .context(tr!("无效的缓存容量选项", "Invalid cache capacity option"))?;
         match preset.mib {
             None => Ok(automatic),
-            Some(mib) => mib.checked_mul(1_048_576).context("缓存容量溢出"),
+            Some(mib) => mib
+                .checked_mul(1_048_576)
+                .context(tr!("缓存容量溢出", "Cache capacity overflow")),
         }
     }
 
     pub fn config(&self, allow_write: bool) -> Result<CacheConfig> {
         if self.write_back_enabled && !allow_write {
-            bail!("写回缓存必须同时确认允许写入");
+            bail!(tr!(
+                "写回缓存必须同时确认允许写入",
+                "Write-back cache requires confirmation to allow writes"
+            ));
         }
         Ok(CacheConfig {
             read_capacity_bytes: if self.read_enabled {
@@ -293,33 +382,54 @@ impl CacheSettings {
 impl BenchSettings {
     pub fn options(&self, capacity: Capacity, session_qd: usize) -> Result<BenchOptions> {
         if self.pattern.is_write() && !self.allow_write {
-            bail!("写入已禁用：请先确认允许破坏 LUN 上的数据");
+            bail!(tr!(
+                "写入已禁用：请先确认允许破坏 LUN 上的数据",
+                "Writes disabled: confirm that data on the LUN may be destroyed first"
+            ));
         }
         if !(1..=3600).contains(&self.seconds)
             || self.queue_depth == 0
             || self.queue_depth > session_qd
         {
-            bail!("时长须为 1–3600 秒；队列深度不能超过当前会话");
+            bail!(tr!(
+                "时长须为 1–3600 秒；队列深度不能超过当前会话",
+                "Duration must be 1-3600 s; queue depth must not exceed the current session"
+            ));
         }
-        let block_size = self.block_kib.checked_mul(1024).context("块大小溢出")?;
+        let block_size = self
+            .block_kib
+            .checked_mul(1024)
+            .context(tr!("块大小溢出", "Block size overflow"))?;
         if block_size == 0
             || block_size > 16 * 1024 * 1024
             || !block_size.is_multiple_of(capacity.block_size as usize)
         {
-            bail!("块大小须为逻辑块的整数倍，且不超过 16 MiB");
+            bail!(tr!(
+                "块大小须为逻辑块的整数倍，且不超过 16 MiB",
+                "Block size must be a multiple of the logical block size and no larger than 16 MiB"
+            ));
         }
         let start = self
             .start_mib
             .checked_mul(1_048_576)
-            .context("起始位置溢出")?;
-        let length = self.range_mib.checked_mul(1_048_576).context("范围溢出")?;
+            .context(tr!("起始位置溢出", "Start offset overflow"))?;
+        let length = self
+            .range_mib
+            .checked_mul(1_048_576)
+            .context(tr!("范围溢出", "Range overflow"))?;
         if length < block_size as u64 || start as u128 + length as u128 > capacity.bytes() {
-            bail!("测试范围超出 LUN 或小于一个请求块");
+            bail!(tr!(
+                "测试范围超出 LUN 或小于一个请求块",
+                "Benchmark range exceeds the LUN or is smaller than one request block"
+            ));
         }
         if !start.is_multiple_of(u64::from(capacity.block_size))
             || !length.is_multiple_of(u64::from(capacity.block_size))
         {
-            bail!("范围未对齐逻辑块");
+            bail!(tr!(
+                "范围未对齐逻辑块",
+                "Range is not aligned to the logical block size"
+            ));
         }
         Ok(BenchOptions {
             pattern: self.pattern,
@@ -337,11 +447,149 @@ impl BenchSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempHome(PathBuf);
+
+    impl TempHome {
+        fn new() -> Result<Self> {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "iscsi-gui-test-{}-{nonce}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+
+        fn config_path(&self) -> PathBuf {
+            config_path_in(&self.0)
+        }
+
+        fn legacy_path(&self) -> PathBuf {
+            self.0
+                .join("Library/Application Support/iscsi-rs/targets.toml")
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn saved_config(name: &str) -> Config {
+        Config {
+            targets: vec![SavedTarget {
+                name: name.into(),
+                host: "127.0.0.1".into(),
+                iqn: "iqn.2026-11.local.test:target".into(),
+                ..SavedTarget::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn new_config_is_preferred_when_both_exist() -> Result<()> {
+        let home = TempHome::new()?;
+        save_config(&home.config_path(), &saved_config("new"))?;
+        save_config(&home.legacy_path(), &saved_config("legacy"))?;
+        let legacy = fs::read(home.legacy_path())?;
+
+        assert_eq!(load_config(&home.config_path())?.targets[0].name, "new");
+        assert_eq!(fs::read(home.legacy_path())?, legacy);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_config_is_migrated_once_and_remains_untouched() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let home = TempHome::new()?;
+        let path = home.config_path();
+        let config = saved_config("legacy");
+        save_config(&home.legacy_path(), &config)?;
+        let legacy = fs::read(home.legacy_path())?;
+
+        let loaded = load_config(&path)?;
+        assert_eq!(toml::to_string(&loaded)?, toml::to_string(&config)?);
+        assert_eq!(fs::read(&path)?, legacy);
+        assert_eq!(fs::read(home.legacy_path())?, legacy);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())?.permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(path.parent().unwrap())?.count(), 1);
+
+        fs::write(home.legacy_path(), "not valid TOML")?;
+        assert_eq!(load_config(&path)?.targets[0].name, "legacy");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_configs_return_empty_defaults_without_migration() -> Result<()> {
+        let home = TempHome::new()?;
+        assert_eq!(
+            home.config_path(),
+            home.0
+                .join("Library/Application Support/rsiscsi/targets.toml")
+        );
+        assert!(load_config(&home.config_path())?.targets.is_empty());
+        assert!(!home.config_path().parent().unwrap().exists());
+        assert!(!home.legacy_path().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn garbage_legacy_config_returns_empty_defaults() -> Result<()> {
+        let home = TempHome::new()?;
+        let legacy_path = home.legacy_path();
+        fs::create_dir_all(legacy_path.parent().unwrap())?;
+        fs::write(&legacy_path, "not valid TOML")?;
+
+        assert!(load_config(&home.config_path())?.targets.is_empty());
+        assert!(!home.config_path().exists());
+        assert_eq!(fs::read_to_string(legacy_path)?, "not valid TOML");
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_legacy_config_returns_empty_defaults() -> Result<()> {
+        let home = TempHome::new()?;
+        // A directory deterministically fails read_to_string, even when tests run as root.
+        fs::create_dir_all(home.legacy_path())?;
+
+        assert!(load_config(&home.config_path())?.targets.is_empty());
+        assert!(!home.config_path().exists());
+        assert!(home.legacy_path().is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_migration_write_returns_empty_defaults() -> Result<()> {
+        let home = TempHome::new()?;
+        save_config(&home.legacy_path(), &saved_config("legacy"))?;
+        let legacy = fs::read(home.legacy_path())?;
+        std::os::unix::fs::symlink(
+            home.0.join("missing-directory"),
+            home.config_path().parent().unwrap(),
+        )?;
+
+        assert!(load_config(&home.config_path())?.targets.is_empty());
+        assert!(!home.config_path().exists());
+        assert_eq!(fs::read(home.legacy_path())?, legacy);
+        Ok(())
+    }
+
     #[test]
     fn config_roundtrip_preserves_iqn_and_is_private() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!("iscsi-gui-test-{}", std::process::id()));
-        let path = directory.join("targets.toml");
+        let home = TempHome::new()?;
+        let path = home.config_path();
         let iqn = "iqn.2004-04.com.qnap:ts-464c2:iscsi.zhd-macmini-0.873836";
         let config = Config {
             targets: vec![SavedTarget {
@@ -353,7 +601,6 @@ mod tests {
         save_config(&path, &config)?;
         assert_eq!(load_config(&path)?.targets[0].iqn, iqn);
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
-        fs::remove_dir_all(directory)?;
         Ok(())
     }
     #[test]

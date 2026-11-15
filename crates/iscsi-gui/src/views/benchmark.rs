@@ -1,5 +1,6 @@
 use super::*;
-use crate::state::{BenchSettings, CacheSettings, READ_CACHE_PRESETS, WRITE_BACK_PRESETS};
+use crate::i18n::tr;
+use crate::state::{BenchSettings, CacheSettings, read_cache_presets, write_back_presets};
 use anyhow::{Context as _, Result};
 use component::{
     IndexPath, Sizable,
@@ -10,8 +11,6 @@ use component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use iscsi_core::BenchPattern;
-
-const PATTERNS: [&str; 4] = ["顺序读", "随机读", "顺序写", "随机写"];
 
 pub struct BenchForm {
     pub(super) pattern: Entity<SelectState<Vec<&'static str>>>,
@@ -48,7 +47,17 @@ impl BenchForm {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
             pattern: cx.new(|cx| {
-                SelectState::new(PATTERNS.to_vec(), Some(IndexPath::default()), window, cx)
+                SelectState::new(
+                    vec![
+                        tr!("顺序读", "Sequential read"),
+                        tr!("随机读", "Random read"),
+                        tr!("顺序写", "Sequential write"),
+                        tr!("随机写", "Random write"),
+                    ],
+                    Some(IndexPath::default()),
+                    window,
+                    cx,
+                )
             }),
             block: editor::input("1024", window, cx),
             queue: editor::input("32", window, cx),
@@ -60,7 +69,7 @@ impl BenchForm {
             write_back: false,
             read_preset: cx.new(|cx| {
                 SelectState::new(
-                    READ_CACHE_PRESETS
+                    read_cache_presets()
                         .iter()
                         .map(|preset| preset.label)
                         .collect(),
@@ -71,7 +80,7 @@ impl BenchForm {
             }),
             write_preset: cx.new(|cx| {
                 SelectState::new(
-                    WRITE_BACK_PRESETS
+                    write_back_presets()
                         .iter()
                         .map(|preset| preset.label)
                         .collect(),
@@ -100,36 +109,28 @@ impl BenchForm {
     fn settings(&self, cx: &App) -> Result<BenchSettings> {
         Ok(BenchSettings {
             pattern: self.pattern(cx),
-            block_kib: self
-                .block
-                .read(cx)
-                .value()
-                .parse()
-                .context("块大小必须为正整数")?,
-            queue_depth: self
-                .queue
-                .read(cx)
-                .value()
-                .parse()
-                .context("队列深度必须为正整数")?,
-            seconds: self
-                .seconds
-                .read(cx)
-                .value()
-                .parse()
-                .context("时长必须为正整数")?,
-            start_mib: self
-                .start
-                .read(cx)
-                .value()
-                .parse()
-                .context("起始位置必须为非负整数")?,
+            block_kib: self.block.read(cx).value().parse().context(tr!(
+                "块大小必须为正整数",
+                "Block size must be a positive integer"
+            ))?,
+            queue_depth: self.queue.read(cx).value().parse().context(tr!(
+                "队列深度必须为正整数",
+                "Queue depth must be a positive integer"
+            ))?,
+            seconds: self.seconds.read(cx).value().parse().context(tr!(
+                "时长必须为正整数",
+                "Duration must be a positive integer"
+            ))?,
+            start_mib: self.start.read(cx).value().parse().context(tr!(
+                "起始位置必须为非负整数",
+                "Start offset must be a non-negative integer"
+            ))?,
             range_mib: self
                 .range
                 .read(cx)
                 .value()
                 .parse()
-                .context("范围必须为正整数")?,
+                .context(tr!("范围必须为正整数", "Range must be a positive integer"))?,
             allow_write: self.allow_write,
         })
     }
@@ -160,21 +161,21 @@ impl Desktop {
         let write_locked = needs_confirmation && !self.bench_form.allow_write;
         let form = &self.bench_form;
         let controls = [
-            ("块大小 (KiB)", &form.block),
-            ("队列深度", &form.queue),
-            ("时长 (秒)", &form.seconds),
-            ("起始位置 (MiB)", &form.start),
-            ("范围 (MiB)", &form.range),
+            (tr!("块大小 (KiB)", "Block size (KiB)"), &form.block),
+            (tr!("队列深度", "Queue depth"), &form.queue),
+            (tr!("时长 (秒)", "Duration (s)"), &form.seconds),
+            (tr!("起始位置 (MiB)", "Start offset (MiB)"), &form.start),
+            (tr!("范围 (MiB)", "Range (MiB)"), &form.range),
         ];
         v_flex()
             .gap_3()
-            .child(heading("基准测试"))
+            .child(heading(tr!("基准测试", "Benchmark")))
             .child(
                 div().w(px(220.)).child(field(
-                    "模式",
+                    tr!("模式", "Pattern"),
                     Select::new(&form.pattern)
                         .small()
-                        .accessibility_label("测试模式")
+                        .accessibility_label(tr!("测试模式", "Benchmark pattern"))
                         .disabled(running),
                     cx,
                 )),
@@ -207,7 +208,7 @@ impl Desktop {
                             .child(
                                 Checkbox::new("read-cache")
                                     .small()
-                                    .label("读缓存")
+                                    .label(tr!("读缓存", "Read cache"))
                                     .checked(form.read_cache)
                                     .disabled(running)
                                     .on_change(cx.listener(|this, checked, _, cx| {
@@ -216,10 +217,10 @@ impl Desktop {
                                     })),
                             )
                             .child(field(
-                                "读缓存容量",
+                                tr!("读缓存容量", "Read cache capacity"),
                                 Select::new(&form.read_preset)
                                     .small()
-                                    .accessibility_label("读缓存容量")
+                                    .accessibility_label(tr!("读缓存容量", "Read cache capacity"))
                                     .disabled(running || !form.read_cache),
                                 cx,
                             )),
@@ -231,7 +232,7 @@ impl Desktop {
                             .child(
                                 Checkbox::new("write-back")
                                     .small()
-                                    .label("写回缓存（危险）")
+                                    .label(tr!("写回缓存（危险）", "Write-back cache (dangerous)"))
                                     .checked(form.write_back)
                                     .disabled(running)
                                     .on_change(cx.listener(|this, checked, _, cx| {
@@ -240,10 +241,10 @@ impl Desktop {
                                     })),
                             )
                             .child(field(
-                                "写回容量",
+                                tr!("写回容量", "Write-back capacity"),
                                 Select::new(&form.write_preset)
                                     .small()
-                                    .accessibility_label("写回容量")
+                                    .accessibility_label(tr!("写回容量", "Write-back capacity"))
                                     .disabled(running || !form.write_back),
                                 cx,
                             )),
@@ -253,8 +254,9 @@ impl Desktop {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
+                    .child(tr!(
                         "自动容量：读 {} MiB（本机内存 1/8，128 MiB–2 GiB）；写回推荐 {} MiB",
+                        "Automatic capacity: read {} MiB (1/8 of system memory, 128 MiB-2 GiB); recommended write-back {} MiB",
                         iscsi_core::auto_read_cache_bytes() / 1_048_576,
                         iscsi_core::recommended_write_back_bytes() / 1_048_576
                     )),
@@ -263,14 +265,14 @@ impl Desktop {
                 panel.child(
                     div()
                         .text_color(cx.theme().danger)
-                        .child("崩溃或断电会丢失未刷写的写入"),
+                        .child(tr!("崩溃或断电会丢失未刷写的写入", "A crash or power loss will lose unflushed writes")),
                 )
             })
             .when(needs_confirmation || form.allow_write, |panel| {
                 panel.child(
                     Checkbox::new("allow-write")
                         .small()
-                        .label("允许写入（会破坏 LUN 上的数据）")
+                        .label(tr!("允许写入（会破坏 LUN 上的数据）", "Allow writes (destroys data on the LUN)"))
                         .checked(form.allow_write)
                         .disabled(running)
                         .on_change(cx.listener(|this, checked, _, cx| {
@@ -283,14 +285,14 @@ impl Desktop {
                 panel.child(
                     div()
                         .text_color(cx.theme().danger)
-                        .child("写入已禁用：必须先勾选破坏性写入确认。"),
+                        .child(tr!("写入已禁用：必须先勾选破坏性写入确认。", "Writes disabled: confirm destructive writes first.")),
                 )
             })
             .when(self.connection.is_none(), |panel| {
                 panel.child(
                     div()
                         .text_color(cx.theme().muted_foreground)
-                        .child("尚未连接目标"),
+                        .child(tr!("尚未连接目标", "No target connected")),
                 )
             })
             .child(
@@ -301,7 +303,7 @@ impl Desktop {
                             .small()
                             .primary()
                             .icon(assets::IconName::Play)
-                            .label("运行")
+                            .label(tr!("运行", "Run"))
                             .disabled(running || write_locked || self.connection.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.start_benchmark(cx))),
                     )
@@ -309,16 +311,16 @@ impl Desktop {
                         Button::new("cancel-benchmark")
                             .small()
                             .icon(assets::IconName::Square)
-                            .label("取消")
+                            .label(tr!("取消", "Cancel"))
                             .disabled(!running)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.engine.cancel_benchmark();
-                                this.log("请求取消测试；会话将断开");
+                                this.log(tr!("请求取消测试；会话将断开", "Benchmark cancellation requested; the session will disconnect"));
                                 cx.notify();
                             })),
                     ),
             )
-            .children(operation_line("测试", &self.bench, cx))
+            .children(operation_line(tr!("测试", "Benchmark"), &self.bench, cx))
             .child(self.benchmark_results(cx))
     }
 
@@ -340,7 +342,10 @@ impl Desktop {
                 self.bench = Operation::Running;
                 self.report = None;
                 self.history.clear();
-                self.log("开始单连接基准测试");
+                self.log(tr!(
+                    "开始单连接基准测试",
+                    "Starting single-connection benchmark"
+                ));
                 if let Some(connection) = &self.connection {
                     self.engine
                         .benchmark(connection.session.clone(), options, cache);
@@ -352,7 +357,7 @@ impl Desktop {
     }
 
     fn benchmark_results(&self, cx: &App) -> Div {
-        let mut results = v_flex().gap_3().child(heading("结果"));
+        let mut results = v_flex().gap_3().child(heading(tr!("结果", "Results")));
         if let Some(report) = &self.report {
             for measurement in &report.results {
                 results = results
@@ -360,7 +365,7 @@ impl Desktop {
                         h_flex()
                             .gap_6()
                             .child(metric(
-                                "吞吐量",
+                                tr!("吞吐量", "Throughput"),
                                 format!("{:.2} MiB/s", measurement.mib_per_second),
                             ))
                             .child(metric("IOPS", format!("{:.2}", measurement.iops))),
@@ -376,23 +381,25 @@ impl Desktop {
                         cx,
                     ))
                     .child(pair(
-                        "完成请求 / 测量时间",
-                        format!(
+                        tr!("完成请求 / 测量时间", "Completed requests / elapsed time"),
+                        tr!(
                             "{} / {:.3} 秒",
-                            measurement.commands, measurement.elapsed_seconds
+                            "{} / {:.3} s",
+                            measurement.commands,
+                            measurement.elapsed_seconds
                         ),
                         cx,
                     ))
                     .child(pair(
-                        "队列深度 / 连接数",
+                        tr!("队列深度 / 连接数", "Queue depth / connections"),
                         format!("{} / 1", measurement.queue_depth),
                         cx,
                     ));
             }
             if report.flush_seconds > 0. {
                 results = results.child(pair(
-                    "缓存同步耗时",
-                    format!("{:.3} 秒", report.flush_seconds),
+                    tr!("缓存同步耗时", "Cache sync time"),
+                    tr!("{:.3} 秒", "{:.3} s", report.flush_seconds),
                     cx,
                 ));
             }
@@ -400,7 +407,7 @@ impl Desktop {
             results = results.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("暂无完成结果"),
+                    .child(tr!("暂无完成结果", "No completed results")),
             );
         }
         results.children(self.sparkline(cx))
@@ -430,7 +437,11 @@ impl Desktop {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("吞吐量 · 最近 60 次采样 · 峰值 {peak:.1} MiB/s")),
+                        .child(tr!(
+                            "吞吐量 · 最近 60 次采样 · 峰值 {peak:.1} MiB/s",
+                            "Throughput · Last 60 samples · Peak {peak:.1} MiB/s",
+                            peak = peak
+                        )),
                 )
                 .child(
                     h_flex()

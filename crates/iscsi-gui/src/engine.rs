@@ -1,5 +1,6 @@
 use crate::{
     disks::DiskEntry,
+    i18n::tr,
     state::{Config, SavedTarget, config_path, load_config, save_config},
 };
 use iscsi_core::{
@@ -109,7 +110,7 @@ impl Engine {
         });
     }
 
-    /// 只读扫描：找出连接后新出现的块设备。不会初始化或挂载任何东西。
+    /// Read-only scan for block devices added after connecting; never initialize or mount anything.
     pub fn scan_disks(&mut self, known: Vec<String>) {
         let runtime = self.runtime.clone();
         self.spawn(async move {
@@ -211,37 +212,15 @@ fn finish_cancelled_benchmark(
     closed: Result<(), String>,
 ) -> Result<Option<BenchReport>, String> {
     match (outcome, closed) {
-        (Err(error), Err(cleanup)) => Err(format!("{error}；刷写或退出失败：{cleanup}")),
+        (Err(error), Err(cleanup)) => Err(tr!(
+            "{error}；刷写或退出失败：{cleanup}",
+            "{error}; flush or logout failed: {cleanup}",
+            error = error,
+            cleanup = cleanup
+        )),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(cleanup)) => Err(cleanup),
         (Ok(_), Ok(())) => Ok(None),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cancellation_never_hides_write_or_cleanup_failures() {
-        assert_eq!(
-            finish_cancelled_benchmark(Err("write failed".into()), Ok(())).unwrap_err(),
-            "write failed"
-        );
-        let failure =
-            finish_cancelled_benchmark(Err("write failed".into()), Err("sync failed".into()))
-                .unwrap_err();
-        assert!(failure.contains("write failed"));
-        assert!(failure.contains("sync failed"));
-        assert_eq!(
-            finish_cancelled_benchmark(Ok(None), Err("sync failed".into())).unwrap_err(),
-            "sync failed"
-        );
-        assert!(
-            finish_cancelled_benchmark(Ok(None), Ok(()))
-                .unwrap()
-                .is_none()
-        );
     }
 }
 
@@ -277,4 +256,31 @@ fn flatten<T>(outcome: Result<anyhow::Result<T>, tokio::task::JoinError>) -> Res
     outcome
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_never_hides_write_or_cleanup_failures() {
+        assert_eq!(
+            finish_cancelled_benchmark(Err("write failed".into()), Ok(())).unwrap_err(),
+            "write failed"
+        );
+        let failure =
+            finish_cancelled_benchmark(Err("write failed".into()), Err("sync failed".into()))
+                .unwrap_err();
+        assert!(failure.contains("write failed"));
+        assert!(failure.contains("sync failed"));
+        assert_eq!(
+            finish_cancelled_benchmark(Ok(None), Err("sync failed".into())).unwrap_err(),
+            "sync failed"
+        );
+        assert!(
+            finish_cancelled_benchmark(Ok(None), Ok(()))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

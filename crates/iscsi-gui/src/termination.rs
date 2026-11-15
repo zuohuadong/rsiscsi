@@ -1,4 +1,5 @@
 //! Route native termination through the same asynchronous window-close gate.
+use crate::i18n::tr;
 use std::sync::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -41,7 +42,7 @@ pub fn install() -> Result<UnboundedReceiver<()>, String> {
         allowed: AtomicBool::new(false),
         requested,
     })
-    .map_err(|_| "退出保护已安装".to_owned())?;
+    .map_err(|_| tr!("退出保护已安装", "Quit protection already installed").to_owned())?;
     #[cfg(target_os = "macos")]
     macos::install()?;
     Ok(receiver)
@@ -49,6 +50,7 @@ pub fn install() -> Result<UnboundedReceiver<()>, String> {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::i18n::tr;
     use std::ffi::{c_char, c_void};
 
     #[cfg(target_arch = "x86_64")]
@@ -79,7 +81,11 @@ mod macos {
         let installed = unsafe {
             let class = objc_getClass(c"GPUIApplicationDelegate".as_ptr());
             if class.is_null() {
-                return Err("无法安装 macOS 退出保护：GPUI 委托不存在".into());
+                return Err(tr!(
+                    "无法安装 macOS 退出保护：GPUI 委托不存在",
+                    "Failed to install macOS quit protection: GPUI delegate not found"
+                )
+                .into());
             }
             class_addMethod(
                 class,
@@ -91,7 +97,11 @@ mod macos {
         if installed as u8 != 0 {
             Ok(())
         } else {
-            Err("无法安装 macOS 退出保护：委托方法已存在".into())
+            Err(tr!(
+                "无法安装 macOS 退出保护：委托方法已存在",
+                "Failed to install macOS quit protection: delegate method already exists"
+            )
+            .into())
         }
     }
 
