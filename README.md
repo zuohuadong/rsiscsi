@@ -66,13 +66,66 @@ CLI 和核心 `benchmark` 同时要求显式破坏性确认及区域：
 写入协议（全即时数据、即时数据加多轮 R2T、无即时数据、CRC32C、缓存同步）
 和两种写入基准均在本地模拟目标上验证。
 
+### 本地缓存
+
+**默认全部关闭**，与目标 MODE SENSE 页面中的 WCE/RCD 不同：这是每个会话独有的
+客户端内存，不会修改目标缓存策略，也不跨进程、重连或目标共享。
+
+- 读缓存：`--cache-size 64MiB`。固定 64 KiB 段、按字节预算的 LRU；
+  仅字节偏移及长度都按段对齐时缓存，连续缺失段合并读取，每次不超过 1 MiB。
+  非对齐请求整条透传。小于一个段的容量不保存任何段。
+- 默认写穿：`--write-back 0`。写入立即发送到 LUN，并失效重叠的本地读缓存；
+  不额外发送 SYNCHRONIZE CACHE，保持原有完成语义。写穿不等于目标掉电持久化。
+- **危险的写回**：`--write-back <容量>` 必须同时提供 `--allow-destructive-write`。
+  对齐写入可以仅进内存就返回。超过脏容量、显式 `flush`、`logout`，或
+  `--flush-interval <毫秒>` 到期时，按 LBA 升序合并写入，再统一发送一次
+  SYNCHRONIZE CACHE（group commit）。只有全部成功才清除脏数据。
+  非对齐写入先刷写旧脏数据，再以原请求写穿，不做读改写或拆分。
+
+**崩溃或断电会丢失未刷写的写入。** 写回不是持久日志、事务或远端共享缓存；
+最后一个 Session 直接被丢弃也不能异步保证刷写。使用方必须显式 `flush` /
+`logout` 并处理错误。`logout(self)` 失败需要重试时，调用方必须保留另一个
+Session 克隆；GUI 会保留原句柄，刷写失败会记录日志并阻止断开、切换目标和关窗。
+CLI 刷写退出失败会返回 5，同时报告未刷写字节数及进程退出造成的内存数据丢失；
+CLI 不提供持久化恢复或隐式重试，不应把失败退出视为数据已落盘。
+进程被强制终止不能拦截。普通读缓存也不具备多发起端一致性：
+其他客户端修改 LUN 不会自动失效此内存缓存，只应在数据稳定或独占访问时开启。
+
+```sh
+# 同一会话内读两遍；只读，不启用写回。
+cargo run -p iscsi-cli -- read --host 10.1.10.1 \
+  --iqn iqn.2004-04.com.qnap:ts-464c2:iscsi.zhd-macmini-0.873836 \
+  --lun 1 --lba 0 --blocks 256 --out target/cached-read.bin \
+  --cache-size 1MiB --repeat 2 --json
+```
+
+`hits` / `misses` 按**字节**计数，命中率为 `hits / (hits + misses)`；
+`misses` 是实际成功从 LUN 读到的字节，包含非对齐透传读，
+`bytes_served` 是从本地读缓存或脏段提供的字节。关闭时统计全部为零。
+`bench --json` 新增 `cache` 字段，原结果字段保持不变。
+`read --repeat` 默认 1，两次独立启动 CLI 不会共享缓存。
+
+Rust API 为 `Session::enable_cache`、`read_cached`、`write_cached`、`cache_stats`；
+`read_pooled` / `read_buffer` 保持原有池化直读路径。原有写 API 始终写穿；
+已有脏数据时先刷写以保持顺序。修改配置仅限空闲、无脏数据时；
+`try_enable_cache` 返回错误，兼容的 `enable_cache` 则记录错误并保留原配置。
+定时刷写错误可通过 `cache_flush_error()` 观察，成功重试后清除。
+
+GUI 基准页提供独立开关和 MiB 容量，默认关闭、0；运行时应用配置。
+写回需要再次确认「允许写入」，会话页仅在缓存开启时显示命中率与脏数据。
+
+大块顺序读、工作集超过缓存或很少重复访问时通常没有收益，反而多一次内存拷贝。
+此前 NAS 后端约 165 MiB/s 的只读对照不能通过低命中率的客户端缓存消除。
+测量方法及本轮只读验收见 [`docs/local-cache.md`](docs/local-cache.md)。
+
 ## 核心设计
 
 - 每连接一个 Tokio socket owner，mpsc 入队、Semaphore 限流、ITT 槽位和代际编号；
   标签不在连接内重用，命令服从经过序号回绕校验的目标窗口。
 - 每批请求、每轮 R2T 的 PDU 编码到可复用发送缓冲区，统一 `write_all`。
 - `read_pooled` / `read_buffer` 直接将 Data-In 收到拥有所有权的池化缓冲区，
-  不经过中间 payload 缓冲。基准 worker 循环复用同一缓冲区。
+  不经过中间 payload 缓冲。缓存关闭时基准 worker 循环复用同一缓冲区；
+  显式启用缓存后使用 `read_cached` / `write_cached`，包含缓存层内存拷贝。
 - 安全 Rust 无法将任意短生命周期 `&mut [u8]` 转移到独立 `'static` socket task；
   因此兼容接口 `read_into` 保留一次最终拷贝，`read` 也会分配返回 Vec。
   oneshot 等任务通信仍有元数据分配，不宣称整个命令路径零分配。
@@ -123,6 +176,7 @@ crates/iscsi-core/src/error.rs        类型化错误
 crates/iscsi-core/src/wire.rs         BHS/PDU、CRC32C、文本键、CHAP 编解码与单元测试
 crates/iscsi-core/src/login.rs        TCP 调优、分阶段登录、CHAP 和参数/窗口协商
 crates/iscsi-core/src/session.rs      会话 API、socket owner、ITT 流水线与 SCSI 传输
+crates/iscsi-core/src/cache.rs        默认关闭的段 LRU、脏段及统计
 crates/iscsi-core/src/scsi.rs         CDB、LUN、INQUIRY/VPD 和容量解析
 crates/iscsi-core/src/pool.rs         有界可复用缓冲区缓存
 crates/iscsi-core/src/stats.rs        原子计数与 EWMA 采样
