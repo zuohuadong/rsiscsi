@@ -8,7 +8,6 @@ description = "Async iSCSI initiator engine (RFC 7143) with a performance-orient
 
 [dependencies]
 tokio = { workspace = true }
-bytes = { workspace = true }
 crc32c = { workspace = true }
 md-5 = { workspace = true }
 thiserror = { workspace = true }
@@ -16,6 +15,9 @@ tracing = { workspace = true }
 serde = { workspace = true }
 socket2 = { workspace = true }
 rand = { workspace = true }
+base64 = "0.22"
+hdrhistogram = { version = "7", default-features = false }
+hostname = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -12,10 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 iscsi-core = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 clap = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
