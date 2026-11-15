@@ -106,20 +106,22 @@ GitHub Releases, for two reasons:
   accumulate sponsorship for the Apple Developer Program fee (everything is ad-hoc signed
   today, see the previous section).
 
-Publishing uses the CTFile REST API by default (`scripts/publish-ctfile.sh`). It needs only a
-session token and creates missing folders automatically. Required repository secrets:
+Publishing currently uses WebDAV (`scripts/publish-webdav.sh`). Required repository secrets:
 
 | Secret | Meaning |
 |---|---|
-| `CTFILE_SESSION` | open API token from the "open API login key" page, not a browser session |
-| `CTFILE_FOLDER_ID` | numeric id of the parent folder, `0` for the drive root |
+| `WEBDAV_URL` | WebDAV server root, for example `https://webdav.ctfile.com/ws35579` |
+| `WEBDAV_USERNAME` | WebDAV user |
+| `WEBDAV_PASSWORD` | WebDAV password; use an app password when 2FA is enabled |
+| `WEBDAV_ROOT_PATH` | upload root, for example `/qnaporg-github`; use `/` for the drive root |
 
 Override the destination folder with the repository variable `SOFTWARE_COLLECTION_DIR`; it
-defaults to `软件集合/rsiscsi` and is always relative to `CTFILE_FOLDER_ID`.
+defaults to `软件集合/rsiscsi`. When that folder sits directly under the drive root, set it to
+`/软件集合/rsiscsi` (a leading `/` ignores `WEBDAV_ROOT_PATH`).
 
-Without a session token, CI falls back to WebDAV (`scripts/publish-webdav.sh`), which needs
-`WEBDAV_URL`, `WEBDAV_USERNAME`, `WEBDAV_PASSWORD` and `WEBDAV_ROOT_PATH`. On that path a
-leading `/` in `SOFTWARE_COLLECTION_DIR` ignores `WEBDAV_ROOT_PATH`.
+Accounts that can generate a token on the "open API login key" page may use the REST API
+instead (`scripts/publish-ctfile.sh`, needs only `CTFILE_SESSION` and `CTFILE_FOLDER_ID`). CI
+tries REST first and falls back to WebDAV automatically.
 
 CI runs only on tags or manual dispatch, so regular pushes do not consume macOS minutes.
 Locally, `./scripts/package-dmg.sh` still produces the same DMG.

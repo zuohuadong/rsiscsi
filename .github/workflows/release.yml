@@ -81,11 +81,25 @@ jobs:
           VERSION: ${{ steps.collect.outputs.version }}
           DMG: ${{ steps.collect.outputs.dmg }}
         run: |
+          webdav_ready=0
+          if [ -n "${WEBDAV_URL:-}" ] && [ -n "${WEBDAV_USERNAME:-}" ] && [ -n "${WEBDAV_PASSWORD:-}" ]; then
+            webdav_ready=1
+          fi
+
           if [ -n "${CTFILE_SESSION:-}" ] && [ -n "${CTFILE_FOLDER_ID:-}" ]; then
-            ./scripts/publish-ctfile.sh
-          elif [ -n "${WEBDAV_URL:-}" ] && [ -n "${WEBDAV_USERNAME:-}" ] && [ -n "${WEBDAV_PASSWORD:-}" ]; then
+            if ./scripts/publish-ctfile.sh; then
+              exit 0
+            fi
+            if [ "$webdav_ready" = 1 ]; then
+              echo "::warning::CTFile REST upload failed; retrying over WebDAV"
+            else
+              exit 1
+            fi
+          fi
+
+          if [ "$webdav_ready" = 1 ]; then
             ./scripts/publish-webdav.sh
           else
-            echo "::error::add CTFILE_SESSION and CTFILE_FOLDER_ID, or WEBDAV_URL, WEBDAV_USERNAME and WEBDAV_PASSWORD"
+            echo "::error::add WEBDAV_URL, WEBDAV_USERNAME and WEBDAV_PASSWORD (or CTFILE_SESSION and CTFILE_FOLDER_ID)"
             exit 1
           fi
