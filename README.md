@@ -103,22 +103,29 @@ CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
 - **支持开发**：下载集中到同一个分享页，便于累积赞助来覆盖 Apple Developer Program
   年费（当前全部为 ad-hoc 签名，见上一节）。
 
-当前使用 WebDAV（`scripts/publish-webdav.sh`）。需要的仓库 Secrets：
+CI 只构建并保留 workflow artifact（`rsiscsi-dmg`），不直接发布。发布必须在国内网络执行：
+城通对 WebDAV 登录做了地区风控，境外 IP 会收到
+`Access denied: Login from different location detected`。
 
-| Secret | 说明 |
-|---|---|
-| `WEBDAV_URL` | WebDAV 服务根地址，例如 `https://webdav.ctfile.com/ws35579` |
-| `WEBDAV_USERNAME` | WebDAV 用户名 |
-| `WEBDAV_PASSWORD` | WebDAV 密码；开启两步验证时使用应用密码 |
-| `WEBDAV_ROOT_PATH` | 上传根路径，例如 `/qnaporg-github`；直接传到网盘根则填 `/` |
+把凭据写进 `.env.release`（已在 `.gitignore` 中，模板见 `.env.release.example`）：
 
-目标目录用仓库变量 `SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`；
-若「软件集合」就在网盘根目录，把它设为 `/软件集合/rsiscsi`（以 `/` 开头即忽略
-`WEBDAV_ROOT_PATH`）。
+```sh
+WEBDAV_URL=https://dav.ctfile.com/ws35579
+WEBDAV_USERNAME=you@example.com
+WEBDAV_PASSWORD=...
+WEBDAV_ROOT_PATH=/
+SOFTWARE_COLLECTION_DIR=软件集合/rsiscsi
+```
 
-如果账号能在后台「开放接口登录密钥管理」生成 token，也可以改用 REST API
-（`scripts/publish-ctfile.sh`，只需要 `CTFILE_SESSION` 与 `CTFILE_FOLDER_ID`）。CI 会优先
-尝试 REST，失败后自动回退到 WebDAV。
+然后一条命令完成构建、签名与上传：
+
+```sh
+./scripts/release-local.sh
+```
+
+产物落在 `软件集合/rsiscsi/<版本>/`，包含 DMG 与 `.sha256`。目录缺失会自动创建，
+重复执行覆盖同名文件。`WEBDAV_ROOT_PATH=/` 表示「软件集合」位于网盘根目录；若它上面还有
+一层目录，改成该目录名，并让 `SOFTWARE_COLLECTION_DIR` 以 `/` 开头即可忽略根路径。
 
 CI 只在打标签或手动触发时运行，不消耗每次推送的 macOS 分钟数；本地仍可用
 `./scripts/package-dmg.sh` 生成同样的 DMG。
@@ -314,6 +321,9 @@ crates/iscsi-gui/src/views/updates.rs 后台事件到 UI 状态的归约
 packaging/Info.plist                  App 包元数据（版本号由脚本替换）
 packaging/使用说明.txt                DMG 内的安装与限制说明
 scripts/package-dmg.sh                构建 .app、ad-hoc 签名并生成 DMG
+scripts/release-local.sh              构建并上传到城通（需 .env.release）
+scripts/publish-webdav.sh             WebDAV 上传，可独立调用
+scripts/publish-ctfile.sh             城通 REST 上传（账号开放密钥可用时）
 ```
 
 真实目标验证数据见 `docs/phase1-verification.md`。

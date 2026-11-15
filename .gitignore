@@ -2,3 +2,4 @@
 /dist
 /kext/build
 .DS_Store
+.env.release

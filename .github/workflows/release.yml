@@ -1,11 +1,12 @@
-name: Build and Publish DMG
+name: Build DMG
 
-# Tag pushes and manual runs publish the DMG to the CTFile drive: the REST API
-# is the primary transport and WebDAV is the fallback. Binaries are
-# intentionally not attached to GitHub Releases: they are hosted on a domestic
-# file-sharing drive so users in mainland China can download without a proxy,
-# and so all traffic lands on one page that also collects sponsorship for the
-# Apple Developer Program fee.
+# Tag pushes and manual runs build the DMG and keep it as a workflow artifact.
+# Publishing happens outside CI: CTFile rejects WebDAV logins from foreign IPs,
+# so a machine in mainland China uploads the artifact with
+# scripts/release-local.sh. Binaries are intentionally not attached to GitHub
+# Releases: they are hosted on a domestic file-sharing drive so users in
+# mainland China can download without a proxy, and so all traffic lands on one
+# page that also collects sponsorship for the Apple Developer Program fee.
 
 on:
   push:
@@ -65,41 +66,14 @@ jobs:
             dist/*.sha256
           retention-days: 30
 
-      - name: Publish
-        env:
-          # CTFile REST API: only a session token is needed and missing folders
-          # are created automatically. This is the preferred transport.
-          CTFILE_SESSION: ${{ secrets.CTFILE_SESSION }}
-          CTFILE_FOLDER_ID: ${{ secrets.CTFILE_FOLDER_ID }}
-          CTFILE_TARGET_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR || '软件集合/rsiscsi' }}
-          # WebDAV fallback for accounts without a usable REST session token.
-          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
-          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
-          WEBDAV_ROOT_PATH: ${{ secrets.WEBDAV_ROOT_PATH }}
-          SOFTWARE_COLLECTION_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR }}
-          VERSION: ${{ steps.collect.outputs.version }}
-          DMG: ${{ steps.collect.outputs.dmg }}
+      - name: Summary
         run: |
-          webdav_ready=0
-          if [ -n "${WEBDAV_URL:-}" ] && [ -n "${WEBDAV_USERNAME:-}" ] && [ -n "${WEBDAV_PASSWORD:-}" ]; then
-            webdav_ready=1
-          fi
-
-          if [ -n "${CTFILE_SESSION:-}" ] && [ -n "${CTFILE_FOLDER_ID:-}" ]; then
-            if ./scripts/publish-ctfile.sh; then
-              exit 0
-            fi
-            if [ "$webdav_ready" = 1 ]; then
-              echo "::warning::CTFile REST upload failed; retrying over WebDAV"
-            else
-              exit 1
-            fi
-          fi
-
-          if [ "$webdav_ready" = 1 ]; then
-            ./scripts/publish-webdav.sh
-          else
-            echo "::error::add WEBDAV_URL, WEBDAV_USERNAME and WEBDAV_PASSWORD (or CTFILE_SESSION and CTFILE_FOLDER_ID)"
-            exit 1
-          fi
+          {
+            echo "### rsiscsi ${{ steps.collect.outputs.version }}"
+            echo
+            echo "Artifact: \`rsiscsi-dmg\` (\`${{ steps.collect.outputs.dmg }}\`)"
+            echo
+            echo "Publishing runs outside CI: CTFile rejects WebDAV logins from"
+            echo "foreign IPs, so a machine in mainland China must run"
+            echo "\`scripts/release-local.sh\` or \`scripts/publish-webdav.sh\`."
+          } >> "$GITHUB_STEP_SUMMARY"

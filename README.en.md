@@ -106,22 +106,29 @@ GitHub Releases, for two reasons:
   accumulate sponsorship for the Apple Developer Program fee (everything is ad-hoc signed
   today, see the previous section).
 
-Publishing currently uses WebDAV (`scripts/publish-webdav.sh`). Required repository secrets:
+CI only builds and keeps a workflow artifact (`rsiscsi-dmg`); it does not publish. Publishing
+must run on a network in mainland China: CTFile rejects WebDAV logins from foreign IPs with
+`Access denied: Login from different location detected`.
 
-| Secret | Meaning |
-|---|---|
-| `WEBDAV_URL` | WebDAV server root, for example `https://webdav.ctfile.com/ws35579` |
-| `WEBDAV_USERNAME` | WebDAV user |
-| `WEBDAV_PASSWORD` | WebDAV password; use an app password when 2FA is enabled |
-| `WEBDAV_ROOT_PATH` | upload root, for example `/qnaporg-github`; use `/` for the drive root |
+Put the credentials in `.env.release` (git-ignored, template in `.env.release.example`):
 
-Override the destination folder with the repository variable `SOFTWARE_COLLECTION_DIR`; it
-defaults to `软件集合/rsiscsi`. When that folder sits directly under the drive root, set it to
-`/软件集合/rsiscsi` (a leading `/` ignores `WEBDAV_ROOT_PATH`).
+```sh
+WEBDAV_URL=https://dav.ctfile.com/ws35579
+WEBDAV_USERNAME=you@example.com
+WEBDAV_PASSWORD=...
+WEBDAV_ROOT_PATH=/
+SOFTWARE_COLLECTION_DIR=软件集合/rsiscsi
+```
 
-Accounts that can generate a token on the "open API login key" page may use the REST API
-instead (`scripts/publish-ctfile.sh`, needs only `CTFILE_SESSION` and `CTFILE_FOLDER_ID`). CI
-tries REST first and falls back to WebDAV automatically.
+Then one command builds, signs and uploads:
+
+```sh
+./scripts/release-local.sh
+```
+
+Artifacts land in `软件集合/rsiscsi/<version>/` as the DMG plus `.sha256`. Missing folders are
+created and re-runs overwrite same-named files. `WEBDAV_ROOT_PATH=/` means `软件集合` sits at
+the drive root; a leading `/` in `SOFTWARE_COLLECTION_DIR` ignores the root path.
 
 CI runs only on tags or manual dispatch, so regular pushes do not consume macOS minutes.
 Locally, `./scripts/package-dmg.sh` still produces the same DMG.
@@ -317,6 +324,9 @@ crates/iscsi-gui/src/views/updates.rs Reduction of background events into UI sta
 packaging/Info.plist                  App bundle metadata (version replaced by the script)
 packaging/使用说明.txt                Installation instructions and limitations in the DMG
 scripts/package-dmg.sh                Build the .app, apply ad-hoc signing and generate the DMG
+scripts/release-local.sh              Build and upload to CTFile (needs .env.release)
+scripts/publish-webdav.sh             Standalone WebDAV upload
+scripts/publish-ctfile.sh             CTFile REST upload, when an open API key exists
 ```
 
 See `docs/phase1-verification.md` for real Target verification data.
