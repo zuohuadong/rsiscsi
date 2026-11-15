@@ -108,7 +108,7 @@ CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
 
 | Secret | 说明 |
 |---|---|
-| `CTFILE_SESSION` | 已登录城通网页端的会话令牌 |
+| `CTFILE_SESSION` | 后台「开放接口登录密钥管理」生成的开放接口 token，不是网页端会话 |
 | `CTFILE_FOLDER_ID` | 父目录的数字 id，`0` 表示网盘根目录 |
 
 目标目录用仓库变量 `SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`；这里的路径

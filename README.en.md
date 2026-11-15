@@ -111,7 +111,7 @@ session token and creates missing folders automatically. Required repository sec
 
 | Secret | Meaning |
 |---|---|
-| `CTFILE_SESSION` | session token from a logged-in CTFile browser session |
+| `CTFILE_SESSION` | open API token from the "open API login key" page, not a browser session |
 | `CTFILE_FOLDER_ID` | numeric id of the parent folder, `0` for the drive root |
 
 Override the destination folder with the repository variable `SOFTWARE_COLLECTION_DIR`; it
