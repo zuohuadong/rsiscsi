@@ -17,16 +17,18 @@ const AUTO_READ_FALLBACK_BYTES: usize = 512 * MIB;
 const WRITE_BACK_MIN_BYTES: usize = 64 * MIB;
 const WRITE_BACK_MAX_BYTES: usize = 256 * MIB;
 
-/// 自动读缓存容量：本机可用内存的 1/8，限制在 128 MiB–2 GiB，按 64 MiB 向下取整。
+/// Automatic read cache size: 1/8 of available memory, clamped to 128 MiB-2 GiB,
+/// rounded down to a multiple of 64 MiB.
 ///
-/// macOS 没有无依赖的可用内存查询，用物理内存近似；都取不到时退回 512 MiB。
-/// 结果按进程缓存，避免界面每帧重复探测。
+/// On macOS, use physical memory as an estimate to avoid extra dependencies.
+/// Fall back to 512 MiB if memory cannot be queried.
+/// Cache the result per process to avoid probing on every UI frame.
 pub fn auto_read_cache_bytes() -> usize {
     static BUDGET: OnceLock<usize> = OnceLock::new();
     *BUDGET.get_or_init(|| auto_read_cache_from(usable_memory_bytes()))
 }
 
-/// 写回缓存推荐容量：自动读缓存的 1/4，限制在 64 MiB–256 MiB。
+/// Recommended write-back size: 1/4 of the automatic read cache, clamped to 64 MiB-256 MiB.
 pub fn recommended_write_back_bytes() -> usize {
     (auto_read_cache_bytes() / 4).clamp(WRITE_BACK_MIN_BYTES, WRITE_BACK_MAX_BYTES)
 }

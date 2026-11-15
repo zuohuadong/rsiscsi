@@ -1,7 +1,10 @@
-# iscsi-rs
+# rsiscsi
 
-Rust 用户态 iSCSI 发起端：协议引擎 + CLI + 原生桌面应用（GPUI / gpui-kit）。
-不会创建、挂载块设备，也不会修改 iSCSIKit、安装系统扩展或更改系统设置。
+[English](README.en.md) | 简体中文
+
+Rust 实现的 iSCSI 发起端：协议引擎 + CLI + 原生桌面应用（GPUI / gpui-kit），
+外加可选的自研 kext，用于把 LUN 只读挂载成本地磁盘。
+除显式加载自研 kext 外，不修改 iSCSIKit、不安装系统扩展、不更改系统设置。
 
 ## 构建与测试
 
@@ -28,6 +31,85 @@ ISCSI_TEST_HOST=10.1.10.1 ISCSI_TEST_LUN=1 \
 
 还可通过 `ISCSI_TEST_IQN` 指定其他 IQN。测试不会写入远端。
 
+## 打包
+
+```sh
+./scripts/package-dmg.sh
+```
+
+产物是 `dist/rsiscsi-<版本>-<架构>.dmg`。脚本只构建用户态应用，使用 ad-hoc 签名，
+不包含 DriverKit 扩展，也不需要关闭 SIP 或修改系统安全设置。
+由于没有开发者签名和公证，`spctl` 会拒绝该 DMG。首次启动需在
+「系统设置 → 隐私与安全性」中点击「仍要打开」（macOS 15 起已无右键打开的绕过方式），
+或执行：
+
+```sh
+xattr -dr com.apple.quarantine /Applications/iSCSI.app
+```
+
+DMG 内的「使用说明.txt」写有同样的步骤。该版本不创建 `/dev/disk*`，
+Finder 与磁盘工具看不到目标磁盘。
+
+## 本地只读挂载（自研 kext）
+
+上面的用户态版本不会创建 `/dev/disk*`。要让 LUN 真正出现在磁盘工具和 Finder 里，
+本仓库自带一个自研 kext（`kext/`，`IOBlockStorageDevice` 子类）和一个 Rust daemon
+（`crates/iscsi-blockd`）。内核只搬运块，iSCSI 协议仍由 `iscsi-core` 在用户态执行；
+不依赖 iSCSIKit，也不链接 libiscsi。
+
+```sh
+./kext/build.sh                                  # 产出 kext/build/ISCSIVirtualDisk.kext
+sudo ./scripts/load-kext.sh                      # 首次加载后需在系统设置里批准
+sudo cargo run -p iscsi-blockd -- \
+  --host 10.1.10.1 \
+  --iqn iqn.2004-04.com.qnap:ts-464c2:iscsi.zhd-macmini-0.873836 \
+  --lun 1
+diskutil list                                    # 另一个终端
+sudo ./scripts/unload-kext.sh
+```
+
+第一版**只读**：kext 对写请求直接返回 `kIOReturnNotWritable`，daemon 只调用
+`Session::read_into`。未签名（ad-hoc）kext 在 Apple silicon 上需要先把启动安全策略
+降到 Permissive Security 并在系统设置中批准；脚本不会修改系统安全设置。
+完整前提、ABI、共享内存布局与排查步骤见 [`docs/kext-mount.md`](docs/kext-mount.md)。
+
+## 代码签名与分发
+
+本项目目前**全部使用 ad-hoc 签名**，没有 Apple Developer Program 付费账号（99 美元/年）。
+这带来两个实际影响：
+
+- **App / DMG**：没有 Developer ID 签名与公证，Gatekeeper 会拒绝首次打开，需要在
+  「系统设置 → 隐私与安全性」点「仍要打开」，或手动
+  `xattr -dr com.apple.quarantine /Applications/iSCSI.app`。
+- **内核扩展**：ad-hoc 签名的 kext 在 Apple silicon 上必须先降低启动安全策略
+  （Permissive Security）并在系统设置中批准，系统大版本升级后通常还要重新批准。
+
+计划：当本仓库的下载量、Star 或捐赠累计足以覆盖开发者年费时，会立即开通
+Apple Developer Program，用 Developer ID Application 证书签名 App 与 DMG 并提交公证，
+消除上面的第一步门槛，并改用正式签名的 kext。
+
+需要说明的是，**开发者账号无法消除 kext 的启动安全策略要求**：Apple silicon 上任何
+第三方 kext（无论签名与否）都需要用户批准并降低启动安全策略。彻底解决要把内核部分
+迁到 DriverKit System Extension（dext），这同样需要付费账号，是本项目的长期方向。
+
+愿意支持本项目（Star、Issue 反馈或捐赠）请通过仓库主页联系作者；不承诺具体时间表。
+
+## 发布与下载
+
+CI 在推送 `v*` 标签或手动触发时构建 DMG，上传到城通网盘的
+「软件集合/rsiscsi/<版本>/」目录，**不在 GitHub Release 附加二进制**。原因有两条：
+
+- **国内下载**：GitHub Release 的下载在国内经常不可达或极慢，网盘链接可以直接访问。
+- **支持开发**：下载集中到同一个分享页，便于累积赞助来覆盖 Apple Developer Program
+  年费（当前全部为 ad-hoc 签名，见上一节）。
+
+需要的仓库 Secrets（与 `qnap-pkg-sync` 同名）：`WEBDAV_URL`、`WEBDAV_USERNAME`、
+`WEBDAV_PASSWORD`、`WEBDAV_ROOT_PATH`。目标目录可用仓库变量
+`SOFTWARE_COLLECTION_DIR` 覆盖，默认 `软件集合/rsiscsi`。
+
+CI 只在打标签或手动触发时运行，不消耗每次推送的 macOS 分钟数；本地仍可用
+`./scripts/package-dmg.sh` 生成同样的 DMG。
+
 ## CLI
 
 ```sh
@@ -45,7 +127,7 @@ cargo run -p iscsi-cli -- bench --host 10.1.10.1 \
 ```
 
 `--json` 的成功结果写入 stdout，错误 JSON 写入 stderr，Cargo/日志不混入结果。
-二进制名称为 `iscsi-rs`，Cargo 包名为 `iscsi-cli`。
+二进制名称为 `rsiscsi`，Cargo 包名为 `iscsi-cli`。
 退出码：0 成功、2 参数、3 连接、4 登录、5 已建立会话的 I/O。
 
 全局开关包括 `--nodelay=false`、`--header-digest`、`--data-digest`。
@@ -126,8 +208,8 @@ GUI 基准页读缓存默认「自动（推荐）」，写回默认关闭（预�
 ### 磁盘可见性
 
 连接只建立 SCSI 会话，不创建 `/dev/disk*`，也不挂载文件系统，所以磁盘工具和 Finder
-看不到它。要让 LUN 以块设备出现，需要 macOS 的 DriverKit SCSI 扩展（例如 iSCSIKit）
-先完成 attach。连接成功后，「会话」页的「磁盘」区块会只读扫描 `diskutil`：
+看不到它。要让 LUN 以块设备出现，需要加载自研 kext 并运行 `iscsi-blockd`，
+见上文「本地只读挂载（自研 kext）」。连接成功后，「会话」页的「磁盘」区块会只读扫描 `diskutil`：
 
 - 新出现且无分区表的盘标记「未初始化」，提供「打开磁盘工具」；
   初始化由用户在磁盘工具里确认，应用绝不自动抹掉。
@@ -173,10 +255,13 @@ URL 和 `to_url()` 的返回值可能含凭据，不得记录到日志。
 
 `cargo run -p iscsi-gui` 打开 900×620 的紧凑窗口（深色单色主题，参考 Volt Native）：
 左侧是已保存目标与 SendTargets 发现，右侧通过「目标 / 会话 / 基准」切换。
-目标保存在 `~/Library/Application Support/iscsi-rs/targets.toml`（目录 0700、文件 0600，
+目标保存在 `~/Library/Application Support/rsiscsi/targets.toml`（目录 0700、文件 0600，
 临时文件 + rename 原子写入），IQN 原样保存、不做规范化。
 连接、INQUIRY/容量读取和实时速率（1 Hz EWMA）在独立 Tokio 任务中执行，
 结果通过 channel 回到 UI 线程，不阻塞渲染。
+
+界面中英双语，启动时按系统语言自动选择（`zh-Hans`/`zh-TW` 等显示中文，其余显示英文）。
+需要固定语言时可用 `RSISCSI_LANG=zh` 或 `RSISCSI_LANG=en` 覆盖，不影响系统设置。
 
 写入测试默认不可见：只有选择顺序写/随机写后才会出现
 「允许写入（会破坏 LUN 上的数据）」确认项，未确认时运行按钮禁用并显示红色警告。
@@ -200,9 +285,10 @@ crates/iscsi-core/src/pool.rs         有界可复用缓冲区缓存
 crates/iscsi-core/src/stats.rs        原子计数与 EWMA 采样
 crates/iscsi-core/src/bench.rs        四种模式、预热、QD 扫描、HDR 延迟与吞吐量
 crates/iscsi-core/tests/mock_target.rs 本地协议、并发、取消和基准集成测试
-crates/iscsi-cli/Cargo.toml           CLI 包和 iscsi-rs 二进制定义
+crates/iscsi-cli/Cargo.toml           CLI 包和 rsiscsi 二进制定义
 crates/iscsi-cli/src/main.rs          中文 clap 命令、JSON、文件输出、退出码
 crates/iscsi-gui/Cargo.toml           GUI 包依赖（gpui-kit 0.9.1）
+crates/iscsi-gui/src/i18n.rs           中英双语文案与系统语言探测
 crates/iscsi-gui/src/main.rs          深色主题、窗口尺寸与 GPUI 启动
 crates/iscsi-gui/src/state.rs         目标模型、配置原子读写、基准参数与安全校验
 crates/iscsi-gui/src/engine.rs        Tokio 运行时桥、事件通道、取消与断开
@@ -212,6 +298,15 @@ crates/iscsi-gui/src/views/editor.rs  目标编辑表单与 URL 导入
 crates/iscsi-gui/src/views/session.rs 会话控制、设备信息、磁盘引导、协商参数与日志
 crates/iscsi-gui/src/views/benchmark.rs 基准表单、结果与吞吐量柱状图
 crates/iscsi-gui/src/views/updates.rs 后台事件到 UI 状态的归约
+packaging/Info.plist                  App 包元数据（版本号由脚本替换）
+packaging/使用说明.txt                DMG 内的安装与限制说明
+scripts/package-dmg.sh                构建 .app、ad-hoc 签名并生成 DMG
 ```
 
 真实目标验证数据见 `docs/phase1-verification.md`。
+
+## 许可证
+
+本项目以 GNU Affero General Public License v3.0 或更新版本发布，
+完整条款见 [`LICENSE`](LICENSE)。通过网络提供本项目的修改版本时，
+同样需要提供对应源码。

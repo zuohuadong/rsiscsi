@@ -133,7 +133,7 @@ mount_nfs -o ro,vers=4.1 10.1.10.1:/Data /tmp/nfs-cached
 ```
 
 NFS 侧测量脚本 `/tmp/nfs_bench.py`：`fcntl(F_NOCACHE)` 绕过本机页缓存，
-N 个线程各自 `pread` 1 秒预热后计时；iSCSI 侧用 `iscsi-rs bench`，同样 1 秒预热、6 秒正式。
+N 个线程各自 `pread` 1 秒预热后计时；iSCSI 侧用 `rsiscsi bench`，同样 1 秒预热、6 秒正式。
 
 | 场景 | iSCSI | NFS |
 | --- | --- | --- |

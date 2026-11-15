@@ -1,0 +1,122 @@
+name: Build and Publish DMG
+
+# Tag pushes and manual runs publish the DMG to the WebDAV drive.
+# Binaries are intentionally not attached to GitHub Releases: they are hosted
+# on a domestic file-sharing drive so users in mainland China can download
+# without a proxy, and so all traffic lands on one page that also collects
+# sponsorship for the Apple Developer Program fee.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Apple silicon runner: the app and the optional kext are arm64 only.
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      # Destination folder inside the WebDAV drive. Override with the repository
+      # variable SOFTWARE_COLLECTION_DIR when the layout differs.
+      TARGET_DIR: ${{ vars.SOFTWARE_COLLECTION_DIR || '软件集合/rsiscsi' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          cat rust-toolchain.toml
+          rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p iscsi-core -p iscsi-gui -p iscsi-blockd
+
+      - name: Build DMG
+        run: ./scripts/package-dmg.sh
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          set -eu
+          dmg=$(ls dist/*.dmg | head -n 1)
+          name=${dmg##*/}
+          version=${name#rsiscsi-}
+          version=${version%-arm64.dmg}
+          shasum -a 256 "$dmg" > "$dmg.sha256"
+          {
+            echo "dmg=$dmg"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          cat "$dmg.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsiscsi-dmg
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          retention-days: 30
+
+      - name: Upload to WebDAV
+        env:
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+          WEBDAV_ROOT_PATH: ${{ secrets.WEBDAV_ROOT_PATH }}
+          VERSION: ${{ steps.collect.outputs.version }}
+          DMG: ${{ steps.collect.outputs.dmg }}
+        run: |
+          set -eu
+          : "${WEBDAV_URL:?add the WEBDAV_URL repository secret}"
+          : "${WEBDAV_USERNAME:?add the WEBDAV_USERNAME repository secret}"
+          : "${WEBDAV_PASSWORD:?add the WEBDAV_PASSWORD repository secret}"
+
+          # Percent-encode every path segment; the target folder name is Chinese.
+          encode() {
+            python3 -c 'import sys,urllib.parse;print("/".join(urllib.parse.quote(p) for p in sys.argv[1].split("/") if p))' "$1"
+          }
+
+          base=${WEBDAV_URL%/}
+          root=${WEBDAV_ROOT_PATH:-/qnaporg-github}
+          dir="$base/$(encode "${root}/${TARGET_DIR}/${VERSION}")"
+
+          # Create parent folders one level at a time; 405 means it already exists.
+          rest="${root}/${TARGET_DIR}/${VERSION}"
+          prefix=""
+          while [ -n "$rest" ]; do
+            case "$rest" in
+              */*) part=${rest%%/*}; rest=${rest#*/} ;;
+              *) part=$rest; rest="" ;;
+            esac
+            prefix="$prefix/$part"
+            code=$(curl --silent --show-error --request MKCOL \
+              --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" \
+              --output /dev/null --write-out '%{http_code}' \
+              "$base$(encode "$prefix")" || true)
+            case "$code" in
+              201|405|301|302) ;;
+              *) echo "MKCOL $prefix failed with HTTP $code" >&2; exit 1 ;;
+            esac
+          done
+
+          for file in "$DMG" "$DMG.sha256"; do
+            name=${file##*/}
+            echo "uploading $name"
+            curl --silent --show-error --fail-with-body \
+              --upload-file "$file" \
+              --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" \
+              "$dir/$(encode "$name")"
+            echo
+          done
+
+          echo "published $VERSION to ${root}/${TARGET_DIR}/${VERSION}"
